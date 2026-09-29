@@ -13,6 +13,7 @@ qt_add_executable(PruebaLapiz
     mainwindow.ui
     canvas.h
     .gitignore
+    freehand.h
 )
 
 target_link_libraries(PruebaLapiz
