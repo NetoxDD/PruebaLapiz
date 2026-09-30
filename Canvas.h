@@ -75,6 +75,8 @@ class Canvas : public QOpenGLWidget {
     Trazo actual;
     QPainterPath contornoVivo;     // contorno del tramo en curso
     QPainterPath congelado;        // tramos ya pasados a la capa
+    QImage respaldo;               // capa antes del tramo vivo (solo al borrar)
+    QRect rectVivo;                // zona de la capa tocada por el borrado en curso
     int idxDibujo = 0;             // capa donde se dibuja el trazo en curso
     bool dibujando = false;
     bool sucio = false;
@@ -333,7 +335,6 @@ protected:
         QPainter p(this);
         p.fillRect(rect(), QColor(90, 90, 90));
         p.setRenderHint(QPainter::Antialiasing);
-        // nítido al acercar mucho, suave al alejar
         p.setRenderHint(QPainter::SmoothPixmapTransform, zoom < 2.0);
         p.setTransform(vista());
         p.fillRect(QRectF(0, 0, docW, docH), Qt::white);
@@ -343,23 +344,12 @@ protected:
             const Capa &c = capas[i];
             if (!c.visible) continue;
             p.setOpacity(c.opacidad);
-            const bool viva = dibujando && i == idxDibujo;
-            if (viva && actual.borrar) {
-                // vista previa del borrado: no se dibuja la zona borrada de esa capa
-                QPainterPath recorte;
-                recorte.addRect(QRectF(0, 0, docW, docH));
-                recorte = recorte.subtracted(contornoVivo);
-                p.save();
-                p.setClipPath(recorte);
-                p.drawImage(0, 0, c.img);
-                p.restore();
-            } else {
-                p.drawImage(0, 0, c.img);
-                if (viva) {
-                    p.setPen(Qt::NoPen);
-                    p.setBrush(actual.color);
-                    p.drawPath(contornoVivo);
-                }
+            p.drawImage(0, 0, c.img);
+            // al pintar se ve el trazo vivo encima; al borrar ya está aplicado en la imagen
+            if (dibujando && i == idxDibujo && !actual.borrar) {
+                p.setPen(Qt::NoPen);
+                p.setBrush(actual.color);
+                p.drawPath(contornoVivo);
             }
         }
 
@@ -582,6 +572,11 @@ private:
         congelado.setFillRule(Qt::WindingFill);
         contornoVivo = calcularContorno(actual, false);
         dibujando = true;
+        if (borrando) {
+            respaldo = c->img;          // copia compartida; se duplica al primer borrado
+            rectVivo = QRect();
+            actualizarBorradoVivo();
+        }
         update();
     }
 
@@ -590,8 +585,12 @@ private:
         if ((d.x() * d.x() + d.y() * d.y()) * zoom * zoom < 2.25) return;
         actual.puntos.push_back({p, presion});
         actual.completo.push_back({p, presion});
-        if (actual.puntos.size() >= 250) congelarTramo();
-        else contornoVivo = calcularContorno(actual, false);
+        if (actual.puntos.size() >= 250) {
+            congelarTramo();
+        } else {
+            contornoVivo = calcularContorno(actual, false);
+            if (actual.borrar) actualizarBorradoVivo();
+        }
         update();
     }
 
@@ -600,16 +599,20 @@ private:
         Capa &c = capas[idxDibujo];
         const QPainterPath cc = calcularContorno(actual, true);
         congelado.addPath(cc);
+        if (actual.borrar) restaurarVivo(c);
         pintarContorno(c.img, cc, actual.color, actual.borrar);
+        if (actual.borrar) { respaldo = c.img; rectVivo = QRect(); }
         std::vector<Punto> resto(actual.puntos.end() - 12, actual.puntos.end());
         actual.puntos = resto;
         contornoVivo = calcularContorno(actual, false);
+        if (actual.borrar) actualizarBorradoVivo();
     }
 
     void terminar() {
         if (!dibujando) return;
         dibujando = false;
         Capa &c = capas[idxDibujo];
+        if (actual.borrar) restaurarVivo(c);
         const QPainterPath ultimo = calcularContorno(actual, true);
         pintarContorno(c.img, ultimo, actual.color, actual.borrar);
         actual.contorno = congelado;
@@ -619,9 +622,38 @@ private:
         historial.push_back(c.id);
         pilaRehacer.clear();
         contornoVivo = QPainterPath();
+        respaldo = QImage();
+        rectVivo = QRect();
         sucio = true;
         info();
         update();
+    }
+
+    // Deja la imagen de la capa como estaba antes del tramo vivo (solo la zona tocada)
+    void restaurarVivo(Capa &c) {
+        if (rectVivo.isEmpty() || respaldo.isNull()) return;
+        QPainter g(&c.img);
+        g.setCompositionMode(QPainter::CompositionMode_Source);
+        g.drawImage(rectVivo.topLeft(), respaldo, rectVivo);
+    }
+
+    // Borra el contorno vivo directamente sobre la capa, tocando solo su zona
+    void actualizarBorradoVivo() {
+        Capa &c = capas[idxDibujo];
+        const QRect nuevo = contornoVivo.boundingRect().toAlignedRect()
+                                .adjusted(-2, -2, 2, 2)
+                                .intersected(QRect(0, 0, docW, docH));
+        const QRect sucia = rectVivo.isEmpty() ? nuevo : rectVivo.united(nuevo);
+        if (sucia.isEmpty()) return;
+        QPainter g(&c.img);
+        g.setCompositionMode(QPainter::CompositionMode_Source);
+        g.drawImage(sucia.topLeft(), respaldo, sucia);       // 1) restaura la zona
+        g.setCompositionMode(QPainter::CompositionMode_DestinationOut);
+        g.setRenderHint(QPainter::Antialiasing);
+        g.setPen(Qt::NoPen);
+        g.setBrush(Qt::black);
+        g.drawPath(contornoVivo);                            // 2) borra con el contorno actual
+        rectVivo = nuevo;
     }
 
     void info() {

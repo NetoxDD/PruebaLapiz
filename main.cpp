@@ -30,6 +30,9 @@
 #include <functional>
 #include <cmath>
 #include "canvas.h"
+#include <QToolButton>
+#include <QStringList>
+#include <QList>
 
 // 1 = pedir la GPU dedicada en portátiles con dos GPU (Windows).
 // 0 = dejar que Windows decida (recomendado por batería y latencia).
@@ -334,13 +337,11 @@ int main(int argc, char *argv[]) {
     QToolBar *barra = ventana.addToolBar("Herramientas");
     barra->setMovable(false);
 
-    QAction *aColor = barra->addAction(iconoColor(canvas->color()), "Color");
-    QObject::connect(aColor, &QAction::triggered, [=, &ventana]() {
+    QAction *aColor = barra->addAction(iconoColor(canvas->color()), "Color...");
+    std::function<void(const QColor &)> usarColor;   // se define junto a la paleta
+    QObject::connect(aColor, &QAction::triggered, [&]() {
         const QColor c = QColorDialog::getColor(canvas->color(), &ventana, "Elige un color");
-        if (c.isValid()) {
-            canvas->setColor(c);
-            aColor->setIcon(iconoColor(c));
-        }
+        if (c.isValid()) usarColor(c);
     });
 
     barra->addSeparator();
@@ -382,6 +383,69 @@ int main(int argc, char *argv[]) {
     QAction *aRehacer = barra->addAction("Rehacer");
     aRehacer->setShortcuts({QKeySequence::Redo, QKeySequence(Qt::CTRL | Qt::Key_Y)});
     QObject::connect(aRehacer, &QAction::triggered, [=]() { canvas->rehacer(); });
+
+    // ---------- Paleta de colores ----------
+    QToolBar *paleta = new QToolBar("Colores");
+    paleta->setMovable(false);
+    ventana.addToolBarBreak();
+    ventana.addToolBar(paleta);
+
+    auto estilo = [](QToolButton *b, const QColor &c, bool vacio) {
+        if (vacio)
+            b->setStyleSheet("QToolButton{background:transparent;border:1px dashed #666;}");
+        else
+            b->setStyleSheet(QString("QToolButton{background:%1;border:1px solid #666;}"
+                                     "QToolButton:hover{border:2px solid #ffffff;}").arg(c.name()));
+    };
+    auto nuevoBoton = [&](const QColor &c, bool vacio) {
+        QToolButton *b = new QToolButton;
+        b->setFixedSize(24, 24);
+        b->setFocusPolicy(Qt::NoFocus);
+        estilo(b, c, vacio);
+        return b;
+    };
+
+    const QStringList base = {
+                               "#000000", "#404040", "#808080", "#c0c0c0", "#ffffff", "#7f0000",
+                               "#e53935", "#ff9800", "#ffeb3b", "#8bc34a", "#2e7d32", "#00bcd4",
+                               "#1e88e5", "#1a237e", "#8e24aa", "#e91e8c", "#795548", "#ffcc99"};
+    for (const QString &h : base) {
+        const QColor c(h);
+        QToolButton *b = nuevoBoton(c, false);
+        b->setToolTip(h);
+        paleta->addWidget(b);
+        QObject::connect(b, &QToolButton::clicked, [&, c]() { usarColor(c); });
+    }
+
+    paleta->addSeparator();
+    paleta->addWidget(new QLabel(" Recientes: "));
+    QList<QColor> recientes;
+    std::vector<QToolButton *> botonesRec;
+    for (int i = 0; i < 8; ++i) {
+        QToolButton *b = nuevoBoton(QColor(), true);
+        b->setEnabled(false);
+        paleta->addWidget(b);
+        botonesRec.push_back(b);
+        QObject::connect(b, &QToolButton::clicked, [&, i]() {
+            if (i < recientes.size()) usarColor(recientes[i]);
+        });
+    }
+
+    usarColor = [&](const QColor &c) {
+        canvas->setColor(c);
+        aColor->setIcon(iconoColor(c));
+        aBorrador->setChecked(false);            // elegir un color vuelve al pincel
+        recientes.removeAll(c);
+        recientes.prepend(c);
+        while (recientes.size() > 8) recientes.removeLast();
+        for (int i = 0; i < int(botonesRec.size()); ++i) {
+            if (i < recientes.size()) {
+                estilo(botonesRec[i], recientes[i], false);
+                botonesRec[i]->setEnabled(true);
+                botonesRec[i]->setToolTip(recientes[i].name());
+            }
+        }
+    };
 
     ventana.show();
 
