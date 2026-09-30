@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.19)
 project(PruebaLapiz LANGUAGES CXX)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets OpenGLWidgets)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets OpenGLWidgets)
 
 qt_standard_project_setup()
 
@@ -16,11 +17,7 @@ qt_add_executable(PruebaLapiz
     freehand.h
 )
 
-target_link_libraries(PruebaLapiz
-    PRIVATE
-        Qt::Core
-        Qt::Widgets
-)
+target_link_libraries(PruebaLapiz PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
 
 install(TARGETS PruebaLapiz
     BUNDLE  DESTINATION .

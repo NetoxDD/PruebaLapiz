@@ -1,12 +1,16 @@
 #pragma once
-#include <QWidget>
+#include <QOpenGLWidget>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QPainter>
 #include <QPainterPath>
-#include <QPixmap>
 #include <QImage>
 #include <QColor>
+#include <QTransform>
 #include <QTabletEvent>
 #include <QMouseEvent>
+#include <QWheelEvent>
+#include <QKeyEvent>
 #include <QPointingDevice>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -16,32 +20,75 @@
 #include <functional>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include "freehand.h"
 
 struct Punto {
-    QPointF pos;
+    QPointF pos;       // coordenadas del lienzo (no de la pantalla)
     qreal presion;
 };
 
 struct Trazo {
-    std::vector<Punto> puntos;     // puntos del tramo en curso (se recorta al congelar)
-    std::vector<Punto> completo;   // TODOS los puntos del trazo (lo que se guarda)
+    std::vector<Punto> puntos;     // tramo en curso (se recorta al congelar)
+    std::vector<Punto> completo;   // TODOS los puntos (lo que se guarda)
     QColor color = Qt::black;
     qreal grosor = 16.0;
+    double thinning = 0.5;
+    double streamline = 0.5;
     bool simular = false;          // true con mouse: presión simulada por velocidad
-    QPainterPath contorno;         // contorno ya calculado
+    bool borrar = false;           // true = borra (modo Clear) en vez de pintar
+    QPainterPath contorno;
 };
 
-class Canvas : public QWidget {
-    std::vector<Trazo> trazos;
-    std::vector<Trazo> pilaRehacer;
-    Trazo actual;
-    bool dibujando = false;
-    bool sucio = false;         // hay cambios sin guardar
+struct Capa {
+    int id = 0;
+    QString nombre;
+    bool visible = true;
+    bool bloqueada = false;
+    double opacidad = 1.0;
+    QImage img;                    // pixeles de la capa (transparente al inicio)
+    std::vector<Trazo> trazos;     // trazos que la forman (base del deshacer y del guardado)
 
-    QPixmap cache;
-    bool cacheSucio = true;
-    QPainterPath congelado;
+    Capa(int id_, const QString &n, int w, int h)
+        : id(id_), nombre(n), img(w, h, QImage::Format_ARGB32_Premultiplied) {
+        img.fill(Qt::transparent);
+    }
+};
+
+struct OpcionesLapiz {
+    bool usarPresion = true;
+    double gamma = 1.0;            // curva: presion^gamma (<1 suave, >1 firme)
+    double efectoPresion = 0.5;    // 0 = grosor constante
+    double suavizado = 0.5;        // 0 = sigue el lápiz exacto
+    int botonLapiz = 0;            // 0 nada, 1 borrador, 2 mover lienzo
+};
+
+class Canvas : public QOpenGLWidget {
+    struct Rehacer { int capaId; Trazo t; };
+
+    std::vector<Capa> capas;       // índice 0 = la de más abajo
+    int activa = 0;
+    int nextId = 1;
+    std::vector<int> historial;    // id de la capa de cada trazo, en orden
+    std::vector<Rehacer> pilaRehacer;
+
+    Trazo actual;
+    QPainterPath contornoVivo;     // contorno del tramo en curso
+    QPainterPath congelado;        // tramos ya pasados a la capa
+    int idxDibujo = 0;             // capa donde se dibuja el trazo en curso
+    bool dibujando = false;
+    bool sucio = false;
+
+    // Lienzo y vista
+    int docW = 2000, docH = 1500;
+    double zoom = 1.0;
+    QPointF offset{0, 0};
+    bool vistaAuto = true;
+    bool paneando = false;
+    QPointF panUltimo;
+    bool espacio = false;
+    QPointF hover;
+    bool hoverValido = false;
 
     QColor colorPincel = Qt::black;
     qreal grosorPincel = 16.0;
@@ -49,11 +96,17 @@ class Canvas : public QWidget {
     bool puntaBorrador = false;
 
 public:
+    OpcionesLapiz lapiz;
     std::function<void(const QString &)> alCambiarInfo;
+    std::function<void(const QString &)> alDatosLapiz;
+    std::function<void(const QString &)> alIniciarGL;
+    std::function<void()> alCambiarCapas;
 
     Canvas() {
         setFocusPolicy(Qt::StrongFocus);
+        setMouseTracking(true);
         setCursor(Qt::CrossCursor);
+        reiniciarCapas(docW, docH);
     }
 
     QColor color() const { return colorPincel; }
@@ -61,60 +114,134 @@ public:
     void setGrosor(qreal g) { grosorPincel = g; }
     void setBorrador(bool b) { modoBorrador = b; }
     bool modificado() const { return sucio; }
+    int ancho() const { return docW; }
+    int alto() const { return docH; }
 
-    void deshacer() {
-        if (dibujando || trazos.empty()) return;
-        pilaRehacer.push_back(trazos.back());
-        trazos.pop_back();
-        cacheSucio = true;
+    // ---------- Capas ----------
+    int numCapas() const { return int(capas.size()); }
+    const Capa &capa(int i) const { return capas[i]; }
+    int indiceActivo() const { return activa; }
+    void setActiva(int i) {
+        if (dibujando || i < 0 || i >= numCapas()) return;
+        activa = i;
+        info();
+    }
+    void nuevaCapa() {
+        if (dibujando) return;
+        const int id = nextId++;
+        capas.insert(capas.begin() + activa + 1, Capa(id, QString("Capa %1").arg(id), docW, docH));
+        activa++;
         sucio = true;
+        cambiaronCapas();
+    }
+    void borrarCapa(int i) {
+        if (dibujando || numCapas() <= 1 || i < 0 || i >= numCapas()) return;
+        const int id = capas[i].id;
+        historial.erase(std::remove(historial.begin(), historial.end(), id), historial.end());
+        pilaRehacer.erase(std::remove_if(pilaRehacer.begin(), pilaRehacer.end(),
+                                         [id](const Rehacer &r) { return r.capaId == id; }), pilaRehacer.end());
+        capas.erase(capas.begin() + i);
+        activa = std::min(activa, numCapas() - 1);
+        sucio = true;
+        cambiaronCapas();
+    }
+    void moverCapa(int i, int delta) {
+        const int j = i + delta;
+        if (dibujando || i < 0 || j < 0 || i >= numCapas() || j >= numCapas()) return;
+        std::swap(capas[i], capas[j]);
+        if (activa == i) activa = j; else if (activa == j) activa = i;
+        sucio = true;
+        cambiaronCapas();
+    }
+    // Estos no avisan a la lista (evita refrescarla mientras se edita)
+    void setVisible(int i, bool v)   { if (ok(i)) { capas[i].visible = v;   marcar(); } }
+    void setBloqueada(int i, bool b) { if (ok(i)) { capas[i].bloqueada = b; marcar(); } }
+    void setOpacidad(int i, double o){ if (ok(i)) { capas[i].opacidad = std::clamp(o, 0.0, 1.0); marcar(); } }
+    void setNombre(int i, const QString &n) { if (ok(i)) { capas[i].nombre = n; marcar(); } }
+
+    // ---------- Vista ----------
+    void ajustar() {
+        const double m = 30;
+        const double zx = (width() - 2 * m) / docW;
+        const double zy = (height() - 2 * m) / docH;
+        zoom = std::clamp(std::min(zx, zy), 0.05, 32.0);
+        offset = QPointF((width() - docW * zoom) / 2, (height() - docH * zoom) / 2);
+        vistaAuto = true;
         info();
         update();
+    }
+    void establecerZoom(double z, const QPointF &ancla) {
+        z = std::clamp(z, 0.05, 32.0);
+        const QPointF d = (ancla - offset) / zoom;
+        zoom = z;
+        offset = ancla - d * zoom;
+        vistaAuto = false;
+        info();
+        update();
+    }
+    QPointF centro() const { return QPointF(width() / 2.0, height() / 2.0); }
+    void acercar() { establecerZoom(zoom * 1.25, centro()); }
+    void alejar()  { establecerZoom(zoom / 1.25, centro()); }
+    void zoom100() { establecerZoom(1.0, centro()); }
+
+    // ---------- Edición ----------
+    void deshacer() {
+        if (dibujando || historial.empty()) return;
+        const int id = historial.back();
+        historial.pop_back();
+        Capa *c = porId(id);
+        if (!c || c->trazos.empty()) return;
+        pilaRehacer.push_back({id, std::move(c->trazos.back())});
+        c->trazos.pop_back();
+        rehacerImagen(*c);
+        sucio = true;
+        info(); update();
     }
     void rehacer() {
         if (dibujando || pilaRehacer.empty()) return;
-        trazos.push_back(pilaRehacer.back());
+        Rehacer r = std::move(pilaRehacer.back());
         pilaRehacer.pop_back();
-        cacheSucio = true;
+        Capa *c = porId(r.capaId);
+        if (!c) return;
+        pintarContorno(c->img, r.t.contorno, r.t.color, r.t.borrar);
+        c->trazos.push_back(std::move(r.t));
+        historial.push_back(c->id);
         sucio = true;
-        info();
-        update();
+        info(); update();
     }
-
-    // Documento vacío
-    void limpiar() {
+    void nuevoLienzo(int w, int h) {
         if (dibujando) return;
-        trazos.clear();
-        pilaRehacer.clear();
-        cacheSucio = true;
+        docW = w; docH = h;
+        reiniciarCapas(w, h);
         sucio = false;
-        info();
-        update();
+        cambiaronCapas();
+        ajustar();
     }
 
     // ---------- Guardar / abrir / exportar ----------
     bool guardar(const QString &ruta) {
-        QJsonArray arr;
-        for (const Trazo &t : trazos) {
-            QJsonArray pts;
-            for (const Punto &p : t.completo) {
-                pts.append(std::round(p.pos.x() * 100) / 100.0);
-                pts.append(std::round(p.pos.y() * 100) / 100.0);
-                pts.append(std::round(p.presion * 1000) / 1000.0);
-            }
+        QJsonArray capasJson;
+        for (const Capa &c : capas) {
+            QJsonArray arr;
+            for (const Trazo &t : c.trazos) arr.append(trazoAJson(t));
             QJsonObject o;
-            o["color"] = t.color.name(QColor::HexArgb);
-            o["grosor"] = t.grosor;
-            o["simular"] = t.simular;
-            o["puntos"] = pts;
-            arr.append(o);
+            o["nombre"] = c.nombre;
+            o["visible"] = c.visible;
+            o["bloqueada"] = c.bloqueada;
+            o["opacidad"] = c.opacidad;
+            o["trazos"] = arr;
+            capasJson.append(o);
         }
+        QJsonObject lienzo;
+        lienzo["ancho"] = docW;
+        lienzo["alto"] = docH;
         QJsonObject raiz;
         raiz["formato"] = "PruebaLapiz";
-        raiz["version"] = 1;
-        raiz["trazos"] = arr;
+        raiz["version"] = 3;
+        raiz["lienzo"] = lienzo;
+        raiz["capas"] = capasJson;
 
-        QSaveFile f(ruta);   // escritura segura: no corrompe el archivo si falla
+        QSaveFile f(ruta);
         if (!f.open(QIODevice::WriteOnly)) return false;
         f.write(QJsonDocument(raiz).toJson(QJsonDocument::Compact));
         if (!f.commit()) return false;
@@ -132,137 +259,366 @@ public:
         const QJsonObject raiz = doc.object();
         if (raiz["formato"].toString() != "PruebaLapiz") return false;
 
-        std::vector<Trazo> nuevos;
-        for (const QJsonValue &v : raiz["trazos"].toArray()) {
-            const QJsonObject o = v.toObject();
-            const QJsonArray pts = o["puntos"].toArray();
-            if (pts.size() < 3 || pts.size() % 3 != 0) continue;
-            Trazo t;
-            t.color = QColor(o["color"].toString());
-            t.grosor = o["grosor"].toDouble(16.0);
-            t.simular = o["simular"].toBool();
-            for (int i = 0; i + 2 < pts.size(); i += 3)
-                t.completo.push_back({QPointF(pts[i].toDouble(), pts[i + 1].toDouble()),
-                                      pts[i + 2].toDouble()});
-            t.puntos = t.completo;
-            t.contorno = calcularContorno(t, true);
-            nuevos.push_back(std::move(t));
+        const QJsonObject l = raiz["lienzo"].toObject();
+        int w = l["ancho"].toInt(2000), h = l["alto"].toInt(1500);
+        if (w < 100 || w > 6000 || h < 100 || h > 6000) { w = 2000; h = 1500; }
+
+        int id = 1;
+        std::vector<Capa> nuevas;
+        auto cargar = [&](const QJsonArray &arr, Capa &c) {
+            for (const QJsonValue &v : arr) {
+                Trazo t;
+                if (!trazoDeJson(v.toObject(), t)) continue;
+                t.contorno = calcularContorno(t, true);
+                pintarContorno(c.img, t.contorno, t.color, t.borrar);
+                c.trazos.push_back(std::move(t));
+            }
+        };
+        if (raiz.contains("capas")) {
+            for (const QJsonValue &v : raiz["capas"].toArray()) {
+                const QJsonObject o = v.toObject();
+                Capa c(id, o["nombre"].toString(QString("Capa %1").arg(id)), w, h);
+                id++;
+                c.visible = o["visible"].toBool(true);
+                c.bloqueada = o["bloqueada"].toBool(false);
+                c.opacidad = o["opacidad"].toDouble(1.0);
+                cargar(o["trazos"].toArray(), c);
+                nuevas.push_back(std::move(c));
+            }
+        } else {                      // archivos v1 y v2: una sola capa
+            Capa c(id++, "Capa 1", w, h);
+            cargar(raiz["trazos"].toArray(), c);
+            nuevas.push_back(std::move(c));
         }
-        trazos = std::move(nuevos);
+        if (nuevas.empty()) nuevas.push_back(Capa(id++, "Capa 1", w, h));
+
+        docW = w; docH = h;
+        capas = std::move(nuevas);
+        nextId = id;
+        activa = numCapas() - 1;
+        historial.clear();
         pilaRehacer.clear();
-        cacheSucio = true;
         sucio = false;
-        info();
-        update();
+        cambiaronCapas();
+        ajustar();
         return true;
     }
 
     bool exportarPNG(const QString &ruta) const {
-        const int esc = 2;   // el doble de resolución que la pantalla
-        QImage img(width() * esc, height() * esc, QImage::Format_ARGB32_Premultiplied);
-        img.fill(Qt::white);
-        QPainter g(&img);
-        g.setRenderHint(QPainter::Antialiasing);
-        g.scale(esc, esc);
-        g.setPen(Qt::NoPen);
-        for (const Trazo &t : trazos) {
-            g.setBrush(t.color);
-            g.drawPath(t.contorno);
+        QImage out(docW, docH, QImage::Format_ARGB32_Premultiplied);
+        out.fill(Qt::white);
+        QPainter g(&out);
+        for (const Capa &c : capas) {
+            if (!c.visible) continue;
+            g.setOpacity(c.opacidad);
+            g.drawImage(0, 0, c.img);
         }
         g.end();
-        return img.save(ruta, "PNG");
+        return out.save(ruta, "PNG");
     }
 
 protected:
+    // ---------- OpenGL ----------
+    void initializeGL() override {
+        QOpenGLFunctions *f = context()->functions();
+        const char *r = reinterpret_cast<const char *>(f->glGetString(GL_RENDERER));
+        const char *v = reinterpret_cast<const char *>(f->glGetString(GL_VERSION));
+        if (alIniciarGL)
+            alIniciarGL(QString("GPU: %1 (OpenGL %2)")
+                            .arg(QString::fromLatin1(r ? r : "desconocida"),
+                                 QString::fromLatin1(v ? v : "?")));
+    }
+
+    void paintGL() override {
+        QPainter p(this);
+        p.fillRect(rect(), QColor(90, 90, 90));
+        p.setRenderHint(QPainter::Antialiasing);
+        // nítido al acercar mucho, suave al alejar
+        p.setRenderHint(QPainter::SmoothPixmapTransform, zoom < 2.0);
+        p.setTransform(vista());
+        p.fillRect(QRectF(0, 0, docW, docH), Qt::white);
+        p.setClipRect(QRectF(0, 0, docW, docH));
+
+        for (int i = 0; i < numCapas(); ++i) {
+            const Capa &c = capas[i];
+            if (!c.visible) continue;
+            p.setOpacity(c.opacidad);
+            const bool viva = dibujando && i == idxDibujo;
+            if (viva && actual.borrar) {
+                // vista previa del borrado: no se dibuja la zona borrada de esa capa
+                QPainterPath recorte;
+                recorte.addRect(QRectF(0, 0, docW, docH));
+                recorte = recorte.subtracted(contornoVivo);
+                p.save();
+                p.setClipPath(recorte);
+                p.drawImage(0, 0, c.img);
+                p.restore();
+            } else {
+                p.drawImage(0, 0, c.img);
+                if (viva) {
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(actual.color);
+                    p.drawPath(contornoVivo);
+                }
+            }
+        }
+
+        // Círculo de vista previa del pincel (en coordenadas de pantalla)
+        p.resetTransform();
+        p.setClipping(false);
+        p.setOpacity(1.0);
+        if (hoverValido && !paneando && !espacio) {
+            const qreal r = grosorActual() * zoom / 2.0;
+            p.setBrush(Qt::NoBrush);
+            p.setPen(QPen(QColor(255, 255, 255, 200), 3));
+            p.drawEllipse(hover, r, r);
+            p.setPen(QPen(QColor(0, 0, 0, 200), 1));
+            p.drawEllipse(hover, r, r);
+        }
+    }
+
+    void resizeEvent(QResizeEvent *e) override {
+        QOpenGLWidget::resizeEvent(e);    // imprescindible en QOpenGLWidget
+        if (vistaAuto) ajustar();
+    }
+
     // ---------- Lápiz ----------
     void tabletEvent(QTabletEvent *e) override {
         const QPointF p = e->position();
+        hover = p; hoverValido = true;
+        const bool barril = e->buttons() & (Qt::RightButton | Qt::MiddleButton);
+
         switch (e->type()) {
         case QEvent::TabletPress:
-            puntaBorrador = (e->pointerType() == QPointingDevice::PointerType::Eraser);
-            empezar(p, e->pressure(), false);
+            setFocus();
+            if (espacio || (barril && lapiz.botonLapiz == 2)) {
+                iniciarPan(p);
+            } else {
+                puntaBorrador = (e->pointerType() == QPointingDevice::PointerType::Eraser)
+                || (barril && lapiz.botonLapiz == 1);
+                empezar(aDoc(p), aplicarPresion(e->pressure()), false);
+            }
             break;
         case QEvent::TabletMove:
-            if (dibujando) agregar(p, e->pressure());
+            if (paneando) moverPan(p);
+            else if (dibujando) agregar(aDoc(p), aplicarPresion(e->pressure()));
             break;
         case QEvent::TabletRelease:
-            terminar();
+            if (paneando) terminarPan();
+            else terminar();
             puntaBorrador = false;
             break;
         default: break;
         }
-        if (alCambiarInfo)
-            alCambiarInfo(QString("presión %1  tilt %2,%3  |  trazos: %4")
-                              .arg(e->pressure(), 0, 'f', 2).arg(e->xTilt()).arg(e->yTilt())
-                              .arg(trazos.size()));
+
+        if (alDatosLapiz) {
+            QString disp = "otro";
+            if (e->pointerType() == QPointingDevice::PointerType::Pen) disp = "lápiz";
+            else if (e->pointerType() == QPointingDevice::PointerType::Eraser) disp = "borrador";
+            QString b;
+            if (e->buttons() & Qt::LeftButton) b += "punta ";
+            if (e->buttons() & Qt::RightButton) b += "botón1 ";
+            if (e->buttons() & Qt::MiddleButton) b += "botón2 ";
+            alDatosLapiz(QString("%1 | presión %2 | tilt %3,%4 | giro %5° | botones: %6")
+                             .arg(disp)
+                             .arg(e->pressure(), 0, 'f', 2)
+                             .arg(e->xTilt(), 0, 'f', 0).arg(e->yTilt(), 0, 'f', 0)
+                             .arg(e->rotation(), 0, 'f', 0)
+                             .arg(b.isEmpty() ? QString("-") : b.trimmed()));
+        }
+        update();
         e->accept();
     }
 
     // ---------- Mouse ----------
     void mousePressEvent(QMouseEvent *e) override {
         if (e->source() != Qt::MouseEventNotSynthesized) return;
+        setFocus();
+        if (e->button() == Qt::MiddleButton ||
+            (e->button() == Qt::LeftButton && espacio)) {
+            iniciarPan(e->position());
+            return;
+        }
         if (e->button() != Qt::LeftButton) return;
-        empezar(e->position(), 0.5, true);
+        empezar(aDoc(e->position()), 0.5, true);
     }
     void mouseMoveEvent(QMouseEvent *e) override {
         if (e->source() != Qt::MouseEventNotSynthesized) return;
-        if (!dibujando) return;
-        agregar(e->position(), 0.5);
+        hover = e->position(); hoverValido = true;
+        if (paneando) moverPan(e->position());
+        else if (dibujando) agregar(aDoc(e->position()), 0.5);
+        update();
     }
     void mouseReleaseEvent(QMouseEvent *e) override {
         if (e->source() != Qt::MouseEventNotSynthesized) return;
+        if (paneando && (e->button() == Qt::MiddleButton || e->button() == Qt::LeftButton)) {
+            terminarPan();
+            return;
+        }
         if (e->button() != Qt::LeftButton) return;
         terminar();
     }
+    void wheelEvent(QWheelEvent *e) override {
+        const int d = e->angleDelta().y();
+        if (d == 0) return;
+        establecerZoom(zoom * std::pow(1.0015, d), e->position());
+        e->accept();
+    }
+    void leaveEvent(QEvent *) override { hoverValido = false; update(); }
 
-    // ---------- Pintado ----------
-    void resizeEvent(QResizeEvent *) override { cacheSucio = true; }
-
-    void paintEvent(QPaintEvent *) override {
-        if (cacheSucio) reconstruirCache();
-        QPainter g(this);
-        g.drawPixmap(0, 0, cache);
-        if (dibujando) {
-            g.setRenderHint(QPainter::Antialiasing);
-            g.setPen(Qt::NoPen);
-            g.setBrush(actual.color);
-            g.drawPath(calcularContorno(actual, false));
+    // ---------- Teclado (barra espaciadora = mover) ----------
+    void keyPressEvent(QKeyEvent *e) override {
+        if (e->key() == Qt::Key_Space) {
+            if (!e->isAutoRepeat()) { espacio = true; if (!paneando) setCursor(Qt::OpenHandCursor); }
+            return;
         }
+        QOpenGLWidget::keyPressEvent(e);
+    }
+    void keyReleaseEvent(QKeyEvent *e) override {
+        if (e->key() == Qt::Key_Space) {
+            if (!e->isAutoRepeat()) { espacio = false; if (!paneando) setCursor(Qt::CrossCursor); }
+            return;
+        }
+        QOpenGLWidget::keyReleaseEvent(e);
+    }
+    void focusOutEvent(QFocusEvent *e) override {
+        QOpenGLWidget::focusOutEvent(e);
+        espacio = false;
+        if (!paneando) setCursor(Qt::CrossCursor);
     }
 
 private:
+    bool ok(int i) const { return i >= 0 && i < numCapas(); }
+    void marcar() { sucio = true; info(); update(); }
+    void cambiaronCapas() {
+        if (alCambiarCapas) alCambiarCapas();
+        info();
+        update();
+    }
+    void reiniciarCapas(int w, int h) {
+        capas.clear();
+        nextId = 1;
+        capas.push_back(Capa(nextId++, "Capa 1", w, h));
+        activa = 0;
+        historial.clear();
+        pilaRehacer.clear();
+    }
+    Capa *porId(int id) {
+        for (Capa &c : capas) if (c.id == id) return &c;
+        return nullptr;
+    }
+    size_t totalTrazos() const {
+        size_t n = 0;
+        for (const Capa &c : capas) n += c.trazos.size();
+        return n;
+    }
+
+    QTransform vista() const {
+        QTransform t;
+        t.translate(offset.x(), offset.y());
+        t.scale(zoom, zoom);
+        return t;
+    }
+    QPointF aDoc(const QPointF &s) const { return (s - offset) / zoom; }
+
+    qreal grosorActual() const {
+        return (modoBorrador || puntaBorrador) ? grosorPincel * 1.5 : grosorPincel;
+    }
+    qreal aplicarPresion(qreal p) const {
+        if (!lapiz.usarPresion) return 0.5;
+        return std::pow(std::clamp<double>(p, 0.0, 1.0), lapiz.gamma);
+    }
+
+    void iniciarPan(const QPointF &p) {
+        paneando = true;
+        panUltimo = p;
+        setCursor(Qt::ClosedHandCursor);
+    }
+    void moverPan(const QPointF &p) {
+        offset += p - panUltimo;
+        panUltimo = p;
+        vistaAuto = false;
+        update();
+    }
+    void terminarPan() {
+        paneando = false;
+        setCursor(espacio ? Qt::OpenHandCursor : Qt::CrossCursor);
+    }
+
+    // Pinta o borra un contorno sobre la imagen de una capa
+    static void pintarContorno(QImage &img, const QPainterPath &c, const QColor &color, bool borrar) {
+        QPainter g(&img);
+        g.setRenderHint(QPainter::Antialiasing);
+        g.setPen(Qt::NoPen);
+        g.setBrush(borrar ? QColor(Qt::black) : color);
+        g.setCompositionMode(borrar ? QPainter::CompositionMode_DestinationOut
+                                    : QPainter::CompositionMode_SourceOver);
+        g.drawPath(c);
+    }
+    // Reconstruye la imagen de una capa desde sus trazos (tras deshacer)
+    static void rehacerImagen(Capa &c) {
+        c.img.fill(Qt::transparent);
+        for (const Trazo &t : c.trazos) pintarContorno(c.img, t.contorno, t.color, t.borrar);
+    }
+
     void empezar(const QPointF &p, qreal presion, bool simular) {
+        Capa *c = (activa >= 0 && activa < numCapas()) ? &capas[activa] : nullptr;
+        if (!c || c->bloqueada || !c->visible) {
+            if (alCambiarInfo) alCambiarInfo("La capa activa está oculta o bloqueada");
+            return;
+        }
         const bool borrando = modoBorrador || puntaBorrador;
+        idxDibujo = activa;
         actual = Trazo();
         actual.simular = simular;
-        actual.color = borrando ? QColor(Qt::white) : colorPincel;
-        actual.grosor = borrando ? grosorPincel * 1.5 : grosorPincel;
+        actual.borrar = borrando;
+        actual.color = colorPincel;
+        actual.grosor = grosorActual();
+        actual.thinning = lapiz.efectoPresion;
+        actual.streamline = lapiz.suavizado;
         actual.puntos.push_back({p, presion});
         actual.completo.push_back({p, presion});
         congelado = QPainterPath();
         congelado.setFillRule(Qt::WindingFill);
+        contornoVivo = calcularContorno(actual, false);
         dibujando = true;
         update();
     }
 
     void agregar(const QPointF &p, qreal presion) {
         const QPointF d = p - actual.puntos.back().pos;
-        if (d.x() * d.x() + d.y() * d.y() < 2.25) return;
+        if ((d.x() * d.x() + d.y() * d.y()) * zoom * zoom < 2.25) return;
         actual.puntos.push_back({p, presion});
         actual.completo.push_back({p, presion});
         if (actual.puntos.size() >= 250) congelarTramo();
+        else contornoVivo = calcularContorno(actual, false);
         update();
+    }
+
+    // Pasa el tramo a la imagen de la capa y sigue con uno nuevo
+    void congelarTramo() {
+        Capa &c = capas[idxDibujo];
+        const QPainterPath cc = calcularContorno(actual, true);
+        congelado.addPath(cc);
+        pintarContorno(c.img, cc, actual.color, actual.borrar);
+        std::vector<Punto> resto(actual.puntos.end() - 12, actual.puntos.end());
+        actual.puntos = resto;
+        contornoVivo = calcularContorno(actual, false);
     }
 
     void terminar() {
         if (!dibujando) return;
         dibujando = false;
+        Capa &c = capas[idxDibujo];
         const QPainterPath ultimo = calcularContorno(actual, true);
-        pintarEnCache(ultimo, actual.color);
+        pintarContorno(c.img, ultimo, actual.color, actual.borrar);
         actual.contorno = congelado;
         actual.contorno.addPath(ultimo);
-        trazos.push_back(actual);
+        actual.puntos.clear();
+        c.trazos.push_back(std::move(actual));
+        historial.push_back(c.id);
         pilaRehacer.clear();
+        contornoVivo = QPainterPath();
         sucio = true;
         info();
         update();
@@ -270,43 +626,43 @@ private:
 
     void info() {
         if (alCambiarInfo)
-            alCambiarInfo(QString("trazos: %1").arg(trazos.size()));
+            alCambiarInfo(QString("trazos: %1  |  capa: %2  |  zoom: %3%  |  lienzo: %4×%5")
+                              .arg(totalTrazos()).arg(capas[activa].nombre)
+                              .arg(qRound(zoom * 100)).arg(docW).arg(docH));
     }
 
-    void congelarTramo() {
-        const QPainterPath c = calcularContorno(actual, true);
-        congelado.addPath(c);
-        pintarEnCache(c, actual.color);
-        std::vector<Punto> resto(actual.puntos.end() - 12, actual.puntos.end());
-        actual.puntos = resto;
-    }
-
-    void pintarEnCache(const QPainterPath &p, const QColor &color) {
-        if (cacheSucio) return;
-        QPainter g(&cache);
-        g.setRenderHint(QPainter::Antialiasing);
-        g.setPen(Qt::NoPen);
-        g.setBrush(color);
-        g.drawPath(p);
-    }
-
-    void reconstruirCache() {
-        const qreal dpr = devicePixelRatioF();
-        cache = QPixmap(qRound(width() * dpr), qRound(height() * dpr));
-        cache.setDevicePixelRatio(dpr);
-        cache.fill(Qt::white);
-        QPainter g(&cache);
-        g.setRenderHint(QPainter::Antialiasing);
-        g.setPen(Qt::NoPen);
-        for (const Trazo &t : trazos) {
-            g.setBrush(t.color);
-            g.drawPath(t.contorno);
+    // ---------- JSON ----------
+    static QJsonObject trazoAJson(const Trazo &t) {
+        QJsonArray pts;
+        for (const Punto &p : t.completo) {
+            pts.append(std::round(p.pos.x() * 100) / 100.0);
+            pts.append(std::round(p.pos.y() * 100) / 100.0);
+            pts.append(std::round(p.presion * 1000) / 1000.0);
         }
-        if (dibujando) {
-            g.setBrush(actual.color);
-            g.drawPath(congelado);
-        }
-        cacheSucio = false;
+        QJsonObject o;
+        o["color"] = t.color.name(QColor::HexArgb);
+        o["grosor"] = t.grosor;
+        o["thin"] = t.thinning;
+        o["suav"] = t.streamline;
+        o["simular"] = t.simular;
+        o["borrar"] = t.borrar;
+        o["puntos"] = pts;
+        return o;
+    }
+    static bool trazoDeJson(const QJsonObject &o, Trazo &t) {
+        const QJsonArray pts = o["puntos"].toArray();
+        if (pts.size() < 3 || pts.size() % 3 != 0) return false;
+        t.color = QColor(o["color"].toString());
+        t.grosor = o["grosor"].toDouble(16.0);
+        t.thinning = o["thin"].toDouble(0.5);
+        t.streamline = o["suav"].toDouble(0.5);
+        t.simular = o["simular"].toBool();
+        t.borrar = o["borrar"].toBool();
+        for (int i = 0; i + 2 < pts.size(); i += 3)
+            t.completo.push_back({QPointF(pts[i].toDouble(), pts[i + 1].toDouble()),
+                                  pts[i + 2].toDouble()});
+        t.puntos = t.completo;
+        return true;
     }
 
     static QPainterPath calcularContorno(const Trazo &t, bool terminado) {
@@ -317,9 +673,9 @@ private:
 
         pf::Options o;
         o.size = t.grosor;
-        o.thinning = 0.5;
+        o.thinning = t.thinning;
         o.smoothing = 0.5;
-        o.streamline = 0.5;
+        o.streamline = t.streamline;
         o.simulatePressure = t.simular;
         o.last = terminado;
 
