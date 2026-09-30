@@ -8,6 +8,7 @@
 #include <QKeyEvent>
 #include <vector>
 #include "freehand.h"
+#include <QPixmap>
 
 struct Punto {
     QPointF pos;
@@ -27,6 +28,8 @@ class Canvas : public QWidget {
     std::vector<Trazo> rehacer;
     Trazo actual;
     bool dibujando = false;
+    QPixmap cache;
+    bool cacheSucio = true;
 
 public:
     Canvas() {
@@ -80,26 +83,25 @@ protected:
             QWidget::keyPressEvent(e);
             return;
         }
+        cacheSucio = true;
         actualizarTitulo();
         update();
     }
 
     // ---------- Pintado ----------
+    void resizeEvent(QResizeEvent *) override { cacheSucio = true; }
+
     void paintEvent(QPaintEvent *) override {
+        if (cacheSucio) reconstruirCache();
         QPainter g(this);
-        g.setRenderHint(QPainter::Antialiasing);
-        g.fillRect(rect(), Qt::white);
-        g.setPen(Qt::NoPen);
-        for (const Trazo &t : trazos) {
-            g.setBrush(t.color);
-            g.drawPath(t.contorno);
-        }
+        g.drawPixmap(0, 0, cache);
         if (dibujando) {
+            g.setRenderHint(QPainter::Antialiasing);
+            g.setPen(Qt::NoPen);
             g.setBrush(actual.color);
             g.drawPath(calcularContorno(actual, false));
         }
     }
-
 private:
     void empezar(const QPointF &p, qreal presion, bool simular) {
         actual = Trazo();
@@ -108,7 +110,10 @@ private:
         dibujando = true;
         update();
     }
-    void agregar(const QPointF &p, qreal presion) {
+        void agregar(const QPointF &p, qreal presion) {
+        // Descarta puntos a menos de 1.5 px del anterior
+        const QPointF d = p - actual.puntos.back().pos;
+        if (d.x() * d.x() + d.y() * d.y() < 2.25) return;
         actual.puntos.push_back({p, presion});
         update();
     }
@@ -116,6 +121,13 @@ private:
         if (!dibujando) return;
         dibujando = false;
         actual.contorno = calcularContorno(actual, true);
+        if (!cacheSucio) {                       // pinta el trazo en la caché
+            QPainter g(&cache);
+            g.setRenderHint(QPainter::Antialiasing);
+            g.setPen(Qt::NoPen);
+            g.setBrush(actual.color);
+            g.drawPath(actual.contorno);
+        }
         trazos.push_back(actual);
         rehacer.clear();
         actualizarTitulo();
@@ -163,5 +175,19 @@ private:
         }
         path.closeSubpath();
         return path;
+    }
+    void reconstruirCache() {
+        const qreal dpr = devicePixelRatioF();
+        cache = QPixmap(QSizeF(size() * dpr).toSize());
+        cache.setDevicePixelRatio(dpr);
+        cache.fill(Qt::white);
+        QPainter g(&cache);
+        g.setRenderHint(QPainter::Antialiasing);
+        g.setPen(Qt::NoPen);
+        for (const Trazo &t : trazos) {
+            g.setBrush(t.color);
+            g.drawPath(t.contorno);
+        }
+        cacheSucio = false;
     }
 };
