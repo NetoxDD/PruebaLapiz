@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include "freehand.h"
+#include <QBuffer>
 
 struct Punto {
     QPointF pos;       // coordenadas del lienzo (no de la pantalla)
@@ -45,6 +46,7 @@ struct Capa {
     QString nombre;
     bool visible = true;
     bool bloqueada = false;
+    bool esPlantilla = false;
     double opacidad = 1.0;
     QImage img;                    // pixeles de la capa (transparente al inicio)
     std::vector<Trazo> trazos;     // trazos que la forman (base del deshacer y del guardado)
@@ -163,6 +165,27 @@ public:
         sucio = true;
         cambiaronCapas();
     }
+    // Inserta una imagen como capa de guía: bloqueada, semitransparente y debajo de todo
+    void cargarPlantilla(const QImage &src, const QString &nombre) {
+        if (dibujando || src.isNull()) return;
+        Capa c(nextId++, nombre, docW, docH);
+        c.esPlantilla = true;
+        c.bloqueada = true;
+        c.opacidad = 0.6;
+        const QImage s = src.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        const QSizeF dest = QSizeF(s.size()).scaled(docW, docH, Qt::KeepAspectRatio);
+        const QRectF r((docW - dest.width()) / 2, (docH - dest.height()) / 2,
+                       dest.width(), dest.height());
+        {
+            QPainter g(&c.img);
+            g.setRenderHint(QPainter::SmoothPixmapTransform);
+            g.drawImage(r, s);
+        }
+        capas.insert(capas.begin(), std::move(c));
+        activa++;                      // la capa activa sigue siendo la misma de antes
+        sucio = true;
+        cambiaronCapas();
+    }
     // Estos no avisan a la lista (evita refrescarla mientras se edita)
     void setVisible(int i, bool v)   { if (ok(i)) { capas[i].visible = v;   marcar(); } }
     void setBloqueada(int i, bool b) { if (ok(i)) { capas[i].bloqueada = b; marcar(); } }
@@ -240,6 +263,14 @@ public:
             o["bloqueada"] = c.bloqueada;
             o["opacidad"] = c.opacidad;
             o["trazos"] = arr;
+            if (c.esPlantilla) {
+                QByteArray bytes;
+                QBuffer buf(&bytes);
+                buf.open(QIODevice::WriteOnly);
+                c.img.save(&buf, "PNG");
+                o["plantilla"] = true;
+                o["imagen"] = QString::fromLatin1(bytes.toBase64());
+            }
             capasJson.append(o);
         }
         QJsonObject lienzo;
@@ -293,6 +324,15 @@ public:
                 c.bloqueada = o["bloqueada"].toBool(false);
                 c.opacidad = o["opacidad"].toDouble(1.0);
                 cargar(o["trazos"].toArray(), c);
+                if (o["plantilla"].toBool()) {
+                    QImage im;
+                    im.loadFromData(QByteArray::fromBase64(o["imagen"].toString().toLatin1()), "PNG");
+                    if (!im.isNull()) {
+                        QPainter g(&c.img);
+                        g.drawImage(0, 0, im.convertToFormat(QImage::Format_ARGB32_Premultiplied));
+                        c.esPlantilla = true;
+                    }
+                }
                 nuevas.push_back(std::move(c));
             }
         } else {                      // archivos v1 y v2: una sola capa
@@ -314,19 +354,19 @@ public:
         return true;
     }
 
-    bool exportarPNG(const QString &ruta) const {
+    bool exportarPNG(const QString &ruta, bool conPlantilla = false) const {
         QImage out(docW, docH, QImage::Format_ARGB32_Premultiplied);
         out.fill(Qt::white);
         QPainter g(&out);
         for (const Capa &c : capas) {
             if (!c.visible) continue;
+            if (c.esPlantilla && !conPlantilla) continue;
             g.setOpacity(c.opacidad);
             g.drawImage(0, 0, c.img);
         }
         g.end();
         return out.save(ruta, "PNG");
     }
-
 protected:
     // ---------- OpenGL ----------
     void initializeGL() override {

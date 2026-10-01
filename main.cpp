@@ -39,6 +39,11 @@
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QImage>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QSettings>
+#include <QRadioButton>
+#include <QCoreApplication>
 
 // 1 = pedir la GPU dedicada en portátiles con dos GPU (Windows).
 // 0 = dejar que Windows decida (recomendado por batería y latencia).
@@ -178,6 +183,10 @@ int main(int argc, char *argv[]) {
 
     QApplication app(argc, argv);
 
+    QCoreApplication::setOrganizationName("PruebaLapiz");
+    QCoreApplication::setApplicationName("PruebaLapiz");
+    QSettings cfg;   // aquí se guardan los recientes
+
     Ventana ventana;
     ventana.resize(1300, 800);
 
@@ -311,13 +320,53 @@ int main(int argc, char *argv[]) {
     lblGPU->setWordWrap(true);
     form->addRow(lblGPU);
 
-    // ---------- Título y estado ----------
+    // ---------- Recientes, abrir e importar ----------
     QString ruta;
     auto titulo = [&]() {
         const QString nombre = ruta.isEmpty() ? "Sin título" : QFileInfo(ruta).fileName();
         ventana.setWindowTitle(QString("%1%2 - PruebaLapiz")
                                    .arg(nombre, canvas->modificado() ? "*" : ""));
     };
+
+    auto recordar = [&](const QString &clave, const QString &r) {
+        QStringList l = cfg.value(clave).toStringList();
+        l.removeAll(r);
+        l.prepend(r);
+        while (l.size() > 12) l.removeLast();
+        cfg.setValue(clave, l);
+    };
+    auto existentes = [&](const QString &clave) {
+        QStringList out;
+        for (const QString &r : cfg.value(clave).toStringList())
+            if (QFileInfo::exists(r)) out << r;
+        return out;
+    };
+
+    auto abrirArchivo = [&](const QString &r) -> bool {
+        if (!canvas->abrir(r)) {
+            QMessageBox::warning(&ventana, "Error", "No se pudo abrir el archivo.");
+            return false;
+        }
+        ruta = r;
+        recordar("proyectosRecientes", r);
+        titulo();
+        return true;
+    };
+
+    auto importarPlantilla = [&](const QString &r) -> bool {
+        const QImage im(r);
+        if (im.isNull()) {
+            QMessageBox::warning(&ventana, "Error", "No se pudo leer la imagen.");
+            return false;
+        }
+        canvas->cargarPlantilla(im, QFileInfo(r).completeBaseName());
+        recordar("plantillasRecientes", r);
+        return true;
+    };
+
+
+    // ---------- Título y estado ----------
+
     canvas->alCambiarInfo = [&](const QString &s) {
         ventana.statusBar()->showMessage(s);
         titulo();
@@ -340,6 +389,7 @@ int main(int argc, char *argv[]) {
             return false;
         }
         ruta = r;
+        recordar("proyectosRecientes", r);
         titulo();
         return true;
     };
@@ -362,22 +412,173 @@ int main(int argc, char *argv[]) {
     };
     ventana.puedeCerrar = confirmar;
 
+
+    // ---------- Pantalla de inicio ----------
+    auto pantallaInicio = [&]() {
+        QDialog d(&ventana);
+        d.setWindowTitle("Inicio");
+        QVBoxLayout *principal = new QVBoxLayout(&d);
+        QHBoxLayout *columnas = new QHBoxLayout;
+        principal->addLayout(columnas);
+
+        // --- Izquierda: nuevo dibujo ---
+        QVBoxLayout *izq = new QVBoxLayout;
+        columnas->addLayout(izq);
+        izq->addWidget(new QLabel("<b>Nuevo dibujo</b>"));
+
+        QComboBox *preset = new QComboBox;
+        preset->addItem("Personalizado", QSize(0, 0));
+        preset->addItem("2000 × 1500 (por defecto)", QSize(2000, 1500));
+        preset->addItem("1920 × 1080 (HD)", QSize(1920, 1080));
+        preset->addItem("2480 × 3508 (A4 a 300 ppp)", QSize(2480, 3508));
+        preset->addItem("2000 × 2000 (cuadrado)", QSize(2000, 2000));
+        preset->addItem("3840 × 2160 (4K)", QSize(3840, 2160));
+        preset->addItem("1080 × 1920 (vertical)", QSize(1080, 1920));
+        QSpinBox *sW = new QSpinBox, *sH = new QSpinBox;
+        for (QSpinBox *s : {sW, sH}) { s->setRange(100, 6000); s->setSuffix(" px"); }
+        sW->setValue(canvas->ancho());
+        sH->setValue(canvas->alto());
+        QFormLayout *ft = new QFormLayout;
+        ft->addRow("Medidas:", preset);
+        ft->addRow("Ancho:", sW);
+        ft->addRow("Alto:", sH);
+        izq->addLayout(ft);
+
+        QRadioButton *rBlanco = new QRadioButton("Lienzo en blanco");
+        QRadioButton *rPlant = new QRadioButton("Con la plantilla seleccionada");
+        rBlanco->setChecked(true);
+        QCheckBox *cTam = new QCheckBox("Ajustar el lienzo al tamaño de la imagen");
+        izq->addSpacing(10);
+        izq->addWidget(rBlanco);
+        izq->addWidget(rPlant);
+        izq->addWidget(cTam);
+        izq->addStretch();
+
+        // --- Derecha: plantillas y proyectos ---
+        QVBoxLayout *der = new QVBoxLayout;
+        columnas->addLayout(der);
+        der->addWidget(new QLabel("<b>Plantillas que has usado</b>"));
+        QListWidget *gal = new QListWidget;
+        gal->setViewMode(QListView::IconMode);
+        gal->setIconSize(QSize(140, 100));
+        gal->setResizeMode(QListView::Adjust);
+        gal->setMovement(QListView::Static);
+        gal->setSpacing(8);
+        gal->setMinimumSize(520, 230);
+        der->addWidget(gal);
+        QPushButton *bImportar = new QPushButton("Importar imagen...");
+        der->addWidget(bImportar, 0, Qt::AlignLeft);
+
+        der->addWidget(new QLabel("<b>Proyectos recientes</b>"));
+        QListWidget *proy = new QListWidget;
+        proy->setMinimumHeight(110);
+        der->addWidget(proy);
+
+        auto llenar = [&]() {
+            gal->clear();
+            for (const QString &r : existentes("plantillasRecientes")) {
+                const QImage im(r);
+                if (im.isNull()) continue;
+                const QImage m = im.scaled(140, 100, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                auto *it = new QListWidgetItem(QIcon(QPixmap::fromImage(m)),
+                                               QFileInfo(r).completeBaseName());
+                it->setData(Qt::UserRole, r);
+                it->setToolTip(r);
+                gal->addItem(it);
+            }
+        };
+        llenar();
+        for (const QString &r : existentes("proyectosRecientes")) {
+            auto *it = new QListWidgetItem(QFileInfo(r).fileName());
+            it->setData(Qt::UserRole, r);
+            it->setToolTip(r);
+            proy->addItem(it);
+        }
+
+        // Tamaño según preset y según la imagen elegida
+        QObject::connect(preset, &QComboBox::currentIndexChanged, [&](int i) {
+            const QSize s = preset->itemData(i).toSize();
+            if (s.width() > 0) { sW->setValue(s.width()); sH->setValue(s.height()); }
+        });
+        auto ajustarTam = [&]() {
+            if (!cTam->isChecked() || !gal->currentItem()) return;
+            const QImage im(gal->currentItem()->data(Qt::UserRole).toString());
+            if (im.isNull()) return;
+            QSize s = im.size();
+            if (s.width() > 6000 || s.height() > 6000) s.scale(6000, 6000, Qt::KeepAspectRatio);
+            sW->setValue(std::max(100, s.width()));
+            sH->setValue(std::max(100, s.height()));
+        };
+        QObject::connect(gal, &QListWidget::itemSelectionChanged, [&]() {
+            if (gal->currentItem()) rPlant->setChecked(true);
+            ajustarTam();
+        });
+        QObject::connect(cTam, &QCheckBox::toggled, [&](bool) { ajustarTam(); });
+
+        QObject::connect(bImportar, &QPushButton::clicked, [&]() {
+            const QString r = QFileDialog::getOpenFileName(&d, "Imagen de plantilla", "",
+                                                           "Imágenes (*.png *.jpg *.jpeg *.webp *.bmp)");
+            if (r.isEmpty()) return;
+            if (QImage(r).isNull()) {
+                QMessageBox::warning(&d, "Error", "No se pudo leer la imagen.");
+                return;
+            }
+            recordar("plantillasRecientes", r);
+            llenar();
+            gal->setCurrentRow(0);        // la más reciente queda arriba y seleccionada
+        });
+
+        // --- Botones ---
+        int accion = 0;                   // 0 cancelar, 1 crear, 2 abrir proyecto
+        QString destino;
+        QHBoxLayout *botones = new QHBoxLayout;
+        QPushButton *bAbrir = new QPushButton("Abrir proyecto...");
+        QPushButton *bCrear = new QPushButton("Crear");
+        QPushButton *bCancel = new QPushButton("Cancelar");
+        bCrear->setDefault(true);
+        botones->addWidget(bAbrir);
+        botones->addStretch();
+        botones->addWidget(bCancel);
+        botones->addWidget(bCrear);
+        principal->addLayout(botones);
+
+        QObject::connect(bCrear, &QPushButton::clicked, [&]() { accion = 1; d.accept(); });
+        QObject::connect(bCancel, &QPushButton::clicked, &d, &QDialog::reject);
+        QObject::connect(bAbrir, &QPushButton::clicked, [&]() {
+            const QString r = QFileDialog::getOpenFileName(&d, "Abrir dibujo", ruta, "Dibujo (*.plz)");
+            if (r.isEmpty()) return;
+            destino = r; accion = 2; d.accept();
+        });
+        QObject::connect(proy, &QListWidget::itemDoubleClicked, [&](QListWidgetItem *it) {
+            destino = it->data(Qt::UserRole).toString(); accion = 2; d.accept();
+        });
+
+        d.exec();
+        if (accion == 0) return;
+        if (!confirmar()) return;
+
+        if (accion == 2) { abrirArchivo(destino); return; }
+
+        QString imagen;
+        if (rPlant->isChecked() && gal->currentItem())
+            imagen = gal->currentItem()->data(Qt::UserRole).toString();
+        canvas->nuevoLienzo(sW->value(), sH->value());
+        ruta.clear();
+        if (!imagen.isEmpty()) importarPlantilla(imagen);
+        titulo();
+    };
+
     QMenu *mArchivo = ventana.menuBar()->addMenu("&Archivo");
 
     QAction *aNuevo = mArchivo->addAction("Nuevo...");
     aNuevo->setShortcut(QKeySequence::New);
-    QObject::connect(aNuevo, &QAction::triggered, [&]() {
-        if (!confirmar()) return;
-        bool ok = false;
-        const int w = QInputDialog::getInt(&ventana, "Nuevo lienzo", "Ancho (px, máx. 6000):",
-                                           canvas->ancho(), 100, 6000, 100, &ok);
-        if (!ok) return;
-        const int h = QInputDialog::getInt(&ventana, "Nuevo lienzo", "Alto (px, máx. 6000):",
-                                           canvas->alto(), 100, 6000, 100, &ok);
-        if (!ok) return;
-        canvas->nuevoLienzo(w, h);
-        ruta.clear();
-        titulo();
+    QObject::connect(aNuevo, &QAction::triggered, [&]() { pantallaInicio(); });
+
+    QAction *aImportar = mArchivo->addAction("Importar imagen como plantilla...");
+    QObject::connect(aImportar, &QAction::triggered, [&]() {
+        const QString r = QFileDialog::getOpenFileName(&ventana, "Imagen de plantilla", "",
+                                                       "Imágenes (*.png *.jpg *.jpeg *.webp *.bmp)");
+        if (!r.isEmpty()) importarPlantilla(r);
     });
 
     QAction *aAbrir = mArchivo->addAction("Abrir...");
@@ -385,13 +586,7 @@ int main(int argc, char *argv[]) {
     QObject::connect(aAbrir, &QAction::triggered, [&]() {
         if (!confirmar()) return;
         const QString r = QFileDialog::getOpenFileName(&ventana, "Abrir dibujo", ruta, "Dibujo (*.plz)");
-        if (r.isEmpty()) return;
-        if (!canvas->abrir(r)) {
-            QMessageBox::warning(&ventana, "Error", "No se pudo abrir el archivo.");
-            return;
-        }
-        ruta = r;
-        titulo();
+        if (!r.isEmpty()) abrirArchivo(r);
     });
 
     QAction *aGuardar = mArchivo->addAction("Guardar");
@@ -406,11 +601,15 @@ int main(int argc, char *argv[]) {
 
     QAction *aExportar = mArchivo->addAction("Exportar PNG...");
     aExportar->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_E));
+
+    QAction *aIncluir = mArchivo->addAction("Incluir plantilla al exportar");
+    aIncluir->setCheckable(true);
+
     QObject::connect(aExportar, &QAction::triggered, [&]() {
         QString r = QFileDialog::getSaveFileName(&ventana, "Exportar imagen", "", "Imagen PNG (*.png)");
         if (r.isEmpty()) return;
         if (!r.endsWith(".png", Qt::CaseInsensitive)) r += ".png";
-        if (!canvas->exportarPNG(r))
+        if (!canvas->exportarPNG(r, aIncluir->isChecked()))
             QMessageBox::warning(&ventana, "Error", "No se pudo exportar la imagen.");
         else
             ventana.statusBar()->showMessage("Exportado: " + r, 4000);
@@ -631,5 +830,7 @@ int main(int argc, char *argv[]) {
                                  "argumento --software.");
     });
 
+    QTimer::singleShot(0, &ventana, [&]() { pantallaInicio(); });
+
     return app.exec();
-}
+    };
