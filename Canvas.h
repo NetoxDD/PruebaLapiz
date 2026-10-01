@@ -96,6 +96,8 @@ class Canvas : public QOpenGLWidget {
     qreal grosorPincel = 16.0;
     bool modoBorrador = false;
     bool puntaBorrador = false;
+    bool modoCuentagotas = false;
+
 
 public:
     OpcionesLapiz lapiz;
@@ -103,6 +105,12 @@ public:
     std::function<void(const QString &)> alDatosLapiz;
     std::function<void(const QString &)> alIniciarGL;
     std::function<void()> alCambiarCapas;
+    std::function<void(const QColor &)> alElegirColor;
+    void setCuentagotas(bool b) {
+        modoCuentagotas = b;
+        setCursor(b ? Qt::PointingHandCursor : Qt::CrossCursor);
+        update();
+    }
 
     Canvas() {
         setFocusPolicy(Qt::StrongFocus);
@@ -357,7 +365,7 @@ protected:
         p.resetTransform();
         p.setClipping(false);
         p.setOpacity(1.0);
-        if (hoverValido && !paneando && !espacio) {
+            if (hoverValido && !paneando && !espacio && !modoCuentagotas) {
             const qreal r = grosorActual() * zoom / 2.0;
             p.setBrush(Qt::NoBrush);
             p.setPen(QPen(QColor(255, 255, 255, 200), 3));
@@ -381,6 +389,10 @@ protected:
         switch (e->type()) {
         case QEvent::TabletPress:
             setFocus();
+            if (modoCuentagotas || (e->modifiers() & Qt::AltModifier)) {
+                tomarColor(aDoc(p));
+                break;
+            }
             if (espacio || (barril && lapiz.botonLapiz == 2)) {
                 iniciarPan(p);
             } else {
@@ -424,6 +436,11 @@ protected:
     void mousePressEvent(QMouseEvent *e) override {
         if (e->source() != Qt::MouseEventNotSynthesized) return;
         setFocus();
+        if (e->button() == Qt::LeftButton &&
+            (modoCuentagotas || (e->modifiers() & Qt::AltModifier))) {
+            tomarColor(aDoc(e->position()));
+            return;
+        }
         if (e->button() == Qt::MiddleButton ||
             (e->button() == Qt::LeftButton && espacio)) {
             iniciarPan(e->position());
@@ -478,6 +495,7 @@ protected:
     }
 
 private:
+
     bool ok(int i) const { return i >= 0 && i < numCapas(); }
     void marcar() { sucio = true; info(); update(); }
     void cambiaronCapas() {
@@ -733,5 +751,21 @@ private:
         }
         path.closeSubpath();
         return path;
+    }
+    // Color visible en un punto del lienzo (todas las capas combinadas sobre blanco)
+    void tomarColor(const QPointF &d) {
+        const int x = int(std::floor(d.x())), y = int(std::floor(d.y()));
+        if (x < 0 || y < 0 || x >= docW || y >= docH) return;
+        double r = 1, g = 1, b = 1;
+        for (const Capa &c : capas) {
+            if (!c.visible) continue;
+            const QColor px = c.img.pixelColor(x, y);
+            const double a = px.alphaF() * c.opacidad;
+            if (a <= 0) continue;
+            r = px.redF() * a + r * (1 - a);
+            g = px.greenF() * a + g * (1 - a);
+            b = px.blueF() * a + b * (1 - a);
+        }
+        if (alElegirColor) alElegirColor(QColor::fromRgbF(r, g, b));
     }
 };

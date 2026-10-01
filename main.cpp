@@ -33,6 +33,12 @@
 #include <QToolButton>
 #include <QStringList>
 #include <QList>
+#include <QLineEdit>
+#include <QSpinBox>
+#include <QPainter>
+#include <QLinearGradient>
+#include <QMouseEvent>
+#include <QImage>
 
 // 1 = pedir la GPU dedicada en portátiles con dos GPU (Windows).
 // 0 = dejar que Windows decida (recomendado por batería y latencia).
@@ -57,6 +63,102 @@ public:
 protected:
     void closeEvent(QCloseEvent *e) override {
         if (!puedeCerrar || puedeCerrar()) e->accept(); else e->ignore();
+    }
+};
+// Cuadro de saturación/brillo + barra de tono (todos los colores RGB)
+class SelectorColor : public QWidget {
+    double h = 0.0, s = 0.0, v = 0.0;
+    QImage imgSV;
+    double hImg = -1;
+    enum Arrastre { Nada, SV, Tono } arrastre = Nada;
+
+    QRect rSV() const { return QRect(0, 0, width(), height() - 28); }
+    QRect rTono() const { return QRect(0, height() - 20, width(), 20); }
+
+    void mover(const QPointF &p) {
+        if (arrastre == SV) {
+            const QRect r = rSV();
+            s = std::clamp((p.x() - r.left()) / double(r.width() - 1), 0.0, 1.0);
+            v = 1.0 - std::clamp((p.y() - r.top()) / double(r.height() - 1), 0.0, 1.0);
+        } else if (arrastre == Tono) {
+            const QRect r = rTono();
+            h = std::clamp((p.x() - r.left()) / double(r.width() - 1), 0.0, 0.999);
+        }
+        update();
+        if (alCambiar) alCambiar(color());
+    }
+
+public:
+    std::function<void(const QColor &)> alCambiar;   // mientras arrastras
+    std::function<void(const QColor &)> alSoltar;    // al soltar el botón
+
+    SelectorColor() {
+        setMinimumSize(200, 220);
+        setFocusPolicy(Qt::NoFocus);
+    }
+
+    QColor color() const { return QColor::fromHsvF(h, s, v); }
+
+    void setColor(const QColor &c) {          // no dispara los avisos
+        if (c.hsvHueF() >= 0) h = std::min<double>(c.hsvHueF(), 0.999);   // en grises se conserva el tono   // en grises se conserva el tono
+        s = c.hsvSaturationF();
+        v = c.valueF();
+        update();
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent *e) override {
+        const QPoint p = e->position().toPoint();
+        if (rSV().contains(p)) arrastre = SV;
+        else if (rTono().adjusted(0, -6, 0, 6).contains(p)) arrastre = Tono;
+        else return;
+        mover(e->position());
+    }
+    void mouseMoveEvent(QMouseEvent *e) override {
+        if (arrastre != Nada) mover(e->position());
+    }
+    void mouseReleaseEvent(QMouseEvent *) override {
+        if (arrastre == Nada) return;
+        arrastre = Nada;
+        if (alSoltar) alSoltar(color());
+    }
+
+    void paintEvent(QPaintEvent *) override {
+        QPainter g(this);
+        g.setRenderHint(QPainter::Antialiasing);
+
+        // Cuadro SV (se dibuja a 128×128 y se escala)
+        if (imgSV.isNull() || hImg != h) {
+            imgSV = QImage(128, 128, QImage::Format_RGB32);
+            for (int y = 0; y < 128; ++y) {
+                QRgb *fila = reinterpret_cast<QRgb *>(imgSV.scanLine(y));
+                for (int x = 0; x < 128; ++x)
+                    fila[x] = QColor::fromHsvF(h, x / 127.0, 1.0 - y / 127.0).rgb();
+            }
+            hImg = h;
+        }
+        const QRect r = rSV();
+        g.setRenderHint(QPainter::SmoothPixmapTransform);
+        g.drawImage(r, imgSV);
+
+        const QPointF m(r.left() + s * (r.width() - 1), r.top() + (1.0 - v) * (r.height() - 1));
+        g.setBrush(Qt::NoBrush);
+        g.setPen(QPen(Qt::white, 2));
+        g.drawEllipse(m, 6, 6);
+        g.setPen(QPen(Qt::black, 1));
+        g.drawEllipse(m, 7.5, 7.5);
+
+        // Barra de tono
+        const QRect t = rTono();
+        QLinearGradient gr(t.left(), 0, t.right(), 0);
+        for (int i = 0; i <= 6; ++i)
+            gr.setColorAt(i / 6.0, QColor::fromHsvF(i == 6 ? 0.0 : i / 6.0, 1.0, 1.0));
+        g.fillRect(t, gr);
+        const qreal x = t.left() + h * (t.width() - 1);
+        g.setPen(QPen(Qt::white, 2));
+        g.drawRect(QRectF(x - 3, t.top() - 1, 6, t.height() + 2));
+        g.setPen(QPen(Qt::black, 1));
+        g.drawRect(QRectF(x - 4, t.top() - 2, 8, t.height() + 4));
     }
 };
 
@@ -367,6 +469,11 @@ int main(int argc, char *argv[]) {
     aBorrador->setShortcut(QKeySequence(Qt::Key_E));
     QObject::connect(aBorrador, &QAction::toggled, [=](bool activo) { canvas->setBorrador(activo); });
 
+    QAction *aGotero = barra->addAction("Cuentagotas");
+    aGotero->setCheckable(true);
+    aGotero->setShortcut(QKeySequence(Qt::Key_I));
+    QObject::connect(aGotero, &QAction::toggled, [=](bool a) { canvas->setCuentagotas(a); });
+
     QAction *aTableta = barra->addAction("Tableta...");
     QObject::connect(aTableta, &QAction::triggered, [=]() {
         dlg->show();
@@ -383,6 +490,38 @@ int main(int argc, char *argv[]) {
     QAction *aRehacer = barra->addAction("Rehacer");
     aRehacer->setShortcuts({QKeySequence::Redo, QKeySequence(Qt::CTRL | Qt::Key_Y)});
     QObject::connect(aRehacer, &QAction::triggered, [=]() { canvas->rehacer(); });
+
+    // ---------- Paleta de colores ----------
+    // ---------- Selector de color (espectro RGB) ----------
+    QDockWidget *dockColor = new QDockWidget("Color", &ventana);
+    QWidget *pc = new QWidget;
+    QVBoxLayout *vc = new QVBoxLayout(pc);
+    SelectorColor *selector = new SelectorColor;
+    vc->addWidget(selector);
+
+    QLineEdit *hex = new QLineEdit("#000000");
+    hex->setMaxLength(7);
+    QSpinBox *sbR = new QSpinBox, *sbG = new QSpinBox, *sbB = new QSpinBox;
+    for (QSpinBox *sb : {sbR, sbG, sbB}) sb->setRange(0, 255);
+    QHBoxLayout *hrgb = new QHBoxLayout;
+    hrgb->addWidget(new QLabel("R")); hrgb->addWidget(sbR);
+    hrgb->addWidget(new QLabel("G")); hrgb->addWidget(sbG);
+    hrgb->addWidget(new QLabel("B")); hrgb->addWidget(sbB);
+    QFormLayout *fh = new QFormLayout;
+    fh->addRow("Hex:", hex);
+    vc->addLayout(hrgb);
+    vc->addLayout(fh);
+    vc->addStretch();
+    dockColor->setWidget(pc);
+    ventana.addDockWidget(Qt::LeftDockWidgetArea, dockColor);
+
+    auto sincronizarCampos = [=](const QColor &c) {
+        QSignalBlocker b1(hex), b2(sbR), b3(sbG), b4(sbB);
+        hex->setText(c.name());
+        sbR->setValue(c.red());
+        sbG->setValue(c.green());
+        sbB->setValue(c.blue());
+    };
 
     // ---------- Paleta de colores ----------
     QToolBar *paleta = new QToolBar("Colores");
@@ -409,10 +548,10 @@ int main(int argc, char *argv[]) {
                                "#000000", "#404040", "#808080", "#c0c0c0", "#ffffff", "#7f0000",
                                "#e53935", "#ff9800", "#ffeb3b", "#8bc34a", "#2e7d32", "#00bcd4",
                                "#1e88e5", "#1a237e", "#8e24aa", "#e91e8c", "#795548", "#ffcc99"};
-    for (const QString &h : base) {
-        const QColor c(h);
+    for (const QString &hx : base) {
+        const QColor c(hx);
         QToolButton *b = nuevoBoton(c, false);
-        b->setToolTip(h);
+        b->setToolTip(hx);
         paleta->addWidget(b);
         QObject::connect(b, &QToolButton::clicked, [&, c]() { usarColor(c); });
     }
@@ -431,10 +570,15 @@ int main(int argc, char *argv[]) {
         });
     }
 
-    usarColor = [&](const QColor &c) {
+    // Cambia el color activo (sin tocar la lista de recientes)
+    auto aplicarColor = [&](const QColor &c, bool sincronizarSelector) {
         canvas->setColor(c);
         aColor->setIcon(iconoColor(c));
         aBorrador->setChecked(false);            // elegir un color vuelve al pincel
+        sincronizarCampos(c);
+        if (sincronizarSelector) selector->setColor(c);
+    };
+    auto guardarReciente = [&](const QColor &c) {
         recientes.removeAll(c);
         recientes.prepend(c);
         while (recientes.size() > 8) recientes.removeLast();
@@ -446,6 +590,35 @@ int main(int argc, char *argv[]) {
             }
         }
     };
+    usarColor = [&](const QColor &c) {
+        aplicarColor(c, true);
+        guardarReciente(c);
+    };
+
+    // Selector: cambia en vivo, y entra a recientes solo al soltar
+    selector->alCambiar = [&](const QColor &c) { aplicarColor(c, false); };
+    selector->alSoltar = [&](const QColor &c) { guardarReciente(c); };
+
+    // Campos hex y RGB
+    QObject::connect(hex, &QLineEdit::editingFinished, [&]() {
+        const QColor c(hex->text());
+        if (c.isValid()) usarColor(c); else sincronizarCampos(canvas->color());
+    });
+    for (QSpinBox *sb : {sbR, sbG, sbB}) {
+        QObject::connect(sb, &QSpinBox::valueChanged, [&](int) {
+            aplicarColor(QColor(sbR->value(), sbG->value(), sbB->value()), true);
+        });
+        QObject::connect(sb, &QSpinBox::editingFinished, [&]() { guardarReciente(canvas->color()); });
+    }
+
+    // Cuentagotas: usa el color y vuelve al pincel
+    canvas->alElegirColor = [&](const QColor &c) {
+        usarColor(c);
+        aGotero->setChecked(false);
+    };
+
+    sincronizarCampos(canvas->color());
+    selector->setColor(canvas->color());
 
     ventana.show();
 
