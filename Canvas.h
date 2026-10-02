@@ -57,6 +57,14 @@ struct Capa {
     }
 };
 
+struct Pincel {
+    QString nombre;
+    double tam;        // multiplica el tamaño elegido
+    double presion;    // multiplica el efecto de la presión
+    double suavizado;  // se suma al suavizado de la tableta
+    double opacidad;   // 0..1
+};
+
 struct OpcionesLapiz {
     bool usarPresion = true;
     double gamma = 1.0;            // curva: presion^gamma (<1 suave, >1 firme)
@@ -98,6 +106,7 @@ class Canvas : public QOpenGLWidget {
     qreal grosorPincel = 16.0;
     bool modoBorrador = false;
     bool puntaBorrador = false;
+    int pincelActual = 0;
     bool modoCuentagotas = false;
 
 
@@ -125,6 +134,20 @@ public:
     void setColor(const QColor &c) { colorPincel = c; }
     void setGrosor(qreal g) { grosorPincel = g; }
     void setBorrador(bool b) { modoBorrador = b; }
+    static const std::vector<Pincel> &pinceles() {
+        static const std::vector<Pincel> v = {
+                                               {"Tinta",      1.0, 1.0, 0.0, 1.00},
+                                               {"Lápiz",      0.6, 0.6, 0.0, 0.85},
+                                               {"Marcador",   1.6, 0.0, 0.1, 0.45},
+                                               {"Plumilla",   0.8, 1.6, 0.2, 1.00},
+                                               {"Rotulador",  1.0, 0.0, 0.4, 1.00},
+                                               };
+        return v;
+    }
+    void setPincel(int i) {
+        if (i >= 0 && i < int(pinceles().size())) pincelActual = i;
+        update();
+    }
     bool modificado() const { return sucio; }
     int ancho() const { return docW; }
     int alto() const { return docH; }
@@ -570,7 +593,8 @@ private:
     QPointF aDoc(const QPointF &s) const { return (s - offset) / zoom; }
 
     qreal grosorActual() const {
-        return (modoBorrador || puntaBorrador) ? grosorPincel * 1.5 : grosorPincel;
+        if (modoBorrador || puntaBorrador) return grosorPincel * 1.5;
+        return grosorPincel * pinceles()[pincelActual].tam;
     }
     qreal aplicarPresion(qreal p) const {
         if (!lapiz.usarPresion) return 0.5;
@@ -620,11 +644,12 @@ private:
         actual = Trazo();
         actual.simular = simular;
         actual.borrar = borrando;
+        const Pincel &pb = pinceles()[pincelActual];
         actual.color = colorPincel;
         actual.grosor = grosorActual();
-        actual.thinning = lapiz.efectoPresion;
-        actual.streamline = lapiz.suavizado;
-        actual.puntos.push_back({p, presion});
+        actual.thinning = std::clamp(lapiz.efectoPresion * (borrando ? 1.0 : pb.presion), 0.0, 0.95);
+        actual.streamline = std::clamp(lapiz.suavizado + (borrando ? 0.0 : pb.suavizado), 0.0, 0.95);
+        if (!borrando) actual.color.setAlphaF(pb.opacidad);        actual.puntos.push_back({p, presion});
         actual.completo.push_back({p, presion});
         congelado = QPainterPath();
         congelado.setFillRule(Qt::WindingFill);

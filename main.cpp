@@ -668,6 +668,17 @@ int main(int argc, char *argv[]) {
     aBorrador->setShortcut(QKeySequence(Qt::Key_E));
     QObject::connect(aBorrador, &QAction::toggled, [=](bool activo) { canvas->setBorrador(activo); });
 
+    barra->addSeparator();
+    barra->addWidget(new QLabel(" Pincel: "));
+    QComboBox *cPincel = new QComboBox;
+    for (const Pincel &p : Canvas::pinceles()) cPincel->addItem(p.nombre);
+    cPincel->setFocusPolicy(Qt::NoFocus);
+    barra->addWidget(cPincel);
+    QObject::connect(cPincel, &QComboBox::currentIndexChanged, [=](int i) {
+        canvas->setPincel(i);
+        aBorrador->setChecked(false);      // elegir un pincel vuelve a pintar
+    });
+
     QAction *aGotero = barra->addAction("Cuentagotas");
     aGotero->setCheckable(true);
     aGotero->setShortcut(QKeySequence(Qt::Key_I));
