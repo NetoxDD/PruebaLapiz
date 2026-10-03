@@ -12,6 +12,8 @@
 #include <QWheelEvent>
 #include <QKeyEvent>
 #include <QGuiApplication>
+#include <QClipboard>
+#include <QElapsedTimer>
 #include <QPointingDevice>
 #include <functional>
 #include <map>
@@ -82,6 +84,15 @@ class Canvas : public QOpenGLWidget {
     bool modoCuentagotas = false;
     bool modoCubo = false;
 
+    // Selección
+    int modoSel = 0;                     // 0 = herramienta apagada, 1 = rectángulo, 2 = lazo
+    bool seleccionando = false;
+    QPointF selA, selB;
+    std::vector<QPointF> selPuntos;
+    plz::Seleccion sel;                  // máscara de lo seleccionado
+    plz::Contorno selPoly;               // su contorno (en coordenadas del lienzo)
+    QElapsedTimer relojBorrado;          // para juntar eventos mientras se borra
+
 
 public:
     struct OpcionesCubo {
@@ -109,13 +120,47 @@ public:
         update();
     }
 
+    // ---------- Selección ----------
+    void setSeleccion(int modo) { modoSel = modo; seleccionando = false; update(); }   // la selección actual se conserva
+    bool haySeleccion() const { return !sel.vacia(); }
+    void deseleccionar() { sel = plz::Seleccion(); selPoly.clear(); update(); }
+    void seleccionarTodo() {
+        const double W = doc.ancho, H = doc.alto;
+        fijarSeleccion(plz::Seleccion::rectangulo(doc.ancho, doc.alto, plz::Rect{0, 0, doc.ancho, doc.alto}),
+                       {{0, 0}, {W, 0}, {W, H}, {0, H}});
+    }
+    void borrarSel() {
+        if (sel.vacia() || !capaEditable()) return;
+        if (doc.borrarSeleccion(doc.activa, sel)) { info(); update(); }
+    }
+    void copiar(bool cortar) {
+        if (sel.vacia()) return;
+        const plz::Imagen im = doc.copiarSeleccion(doc.activa, sel);
+        if (im.vacia()) return;
+        QGuiApplication::clipboard()->setImage(puente::lectura(im).convertToFormat(QImage::Format_ARGB32));
+        if (cortar) borrarSel();
+    }
+    void pegar() {
+        const QImage q = QGuiApplication::clipboard()->image();
+        if (q.isNull()) { if (alCambiarInfo) alCambiarInfo("No hay ninguna imagen copiada"); return; }
+        if (!capaEditable()) return;
+        plz::Imagen im = puente::aImagen(q);
+        const int w = im.w, h = im.h;
+        const QPointF c = aDoc(hoverValido ? hover : QPointF(width() / 2.0, height() / 2.0));   // centrada donde está el cursor
+        const int x = int(std::lround(c.x() - w / 2.0)), y = int(std::lround(c.y() - h / 2.0));
+        if (!doc.pegar(doc.activa, std::move(im), x, y)) return;
+        fijarSeleccion(plz::Seleccion::rectangulo(doc.ancho, doc.alto, plz::Rect{x, y, x + w, y + h}),
+                       {{double(x), double(y)}, {double(x + w), double(y)}, {double(x + w), double(y + h)}, {double(x), double(y + h)}});
+        info();
+    }
+
     Canvas() {
         setFocusPolicy(Qt::StrongFocus);
         setMouseTracking(true);
         setCursor(Qt::CrossCursor);
         // Así se rasteriza un trazo (el core no sabe de Qt)
         doc.pintor = [](plz::Imagen &im, const Trazo &t) {
-            puente::pintarContornos(im, t.contornos, QColor::fromRgba(t.color), t.borrar);
+            puente::pintarContornos(im, t.contornos, QColor::fromRgba(t.color), t.borrar, &t.recorte);
         };
     }
 
@@ -226,6 +271,7 @@ public:
     void nuevoLienzo(int w, int h) {
         if (dibujando) return;
         doc.reiniciar(w, h);
+        deseleccionar();                     // la selección era del dibujo anterior
         espejos.clear();
         cambiaronCapas();
         ajustar();
@@ -241,6 +287,7 @@ public:
     bool abrir(const QString &ruta) {
         if (dibujando) return false;
         if (!archivo::abrir(doc, ruta)) return false;
+        deseleccionar();
         espejos.clear();
         cambiaronCapas();
         ajustar();
@@ -281,15 +328,33 @@ protected:
                 p.setRenderHint(QPainter::Antialiasing, true);
                 p.setPen(Qt::NoPen);
                 p.setBrush(QColor::fromRgba(actual.color));
+                p.save();
+                if (!actual.recorte.empty()) p.setClipPath(puente::aPoligono(actual.recorte), Qt::IntersectClip);
                 p.drawPath(contornoVivo);
+                p.restore();
             }
+        }
+
+        // Contorno de la selección ("hormigas"): línea negra con trazos blancos encima
+        if (seleccionando || !selPoly.empty()) {
+            QPainterPath cont;
+            if (seleccionando && modoSel == 1) cont.addRect(QRectF(selA, selB).normalized());
+            else if (seleccionando) { QPolygonF pg; for (const QPointF &q : selPuntos) pg << q; cont.addPolygon(pg); }
+            else cont = puente::aPoligono(selPoly);
+            p.setOpacity(1.0);
+            p.setRenderHint(QPainter::Antialiasing, false);
+            QPen negro(Qt::black, 1); negro.setCosmetic(true);
+            QPen blanco(Qt::white, 1, Qt::DashLine); blanco.setCosmetic(true);
+            p.setBrush(Qt::NoBrush);
+            p.setPen(negro); p.drawPath(cont);
+            p.setPen(blanco); p.drawPath(cont);
         }
 
         // Círculo de vista previa del pincel (en coordenadas de pantalla)
         p.resetTransform();
         p.setClipping(false);
         p.setOpacity(1.0);
-            if (hoverValido && !paneando && !espacio && !modoCuentagotas && !modoCubo) {
+            if (hoverValido && !paneando && !espacio && !modoCuentagotas && !modoCubo && !modoSel) {
             p.setRenderHint(QPainter::Antialiasing, true);
             const qreal r = grosorActual() * zoom / 2.0;
             p.setBrush(Qt::NoBrush);
@@ -320,6 +385,8 @@ protected:
             }
             if (espacio || (barril && lapiz.botonLapiz == 2)) {
                 iniciarPan(p);
+            } else if (modoSel) {
+                iniciarSel(aDoc(p));
             } else if (modoCubo) {
                 rellenarEn(aDoc(p));
             } else {
@@ -330,11 +397,12 @@ protected:
             break;
         case QEvent::TabletMove:
             if (paneando) moverPan(p);
+            else if (seleccionando) moverSel(aDoc(p));
             else if (dibujando) agregar(aDoc(p), aplicarPresion(e->pressure()));
             break;
         case QEvent::TabletRelease:
             if (paneando) terminarPan();
-            else terminar();
+            else { terminarSel(); terminar(); }
             puntaBorrador = false;
             break;
         default: break;
@@ -374,6 +442,7 @@ protected:
             return;
         }
         if (e->button() != Qt::LeftButton) return;
+        if (modoSel) { iniciarSel(aDoc(e->position())); return; }
         if (modoCubo) { rellenarEn(aDoc(e->position())); return; }
         empezar(aDoc(e->position()), 0.5, true);
     }
@@ -381,6 +450,7 @@ protected:
         if (e->source() != Qt::MouseEventNotSynthesized) return;
         hover = e->position(); hoverValido = true;
         if (paneando) moverPan(e->position());
+        else if (seleccionando) moverSel(aDoc(e->position()));
         else if (dibujando) agregar(aDoc(e->position()), 0.5);
         update();
     }
@@ -391,6 +461,7 @@ protected:
             return;
         }
         if (e->button() != Qt::LeftButton) return;
+        terminarSel();
         terminar();
     }
     void wheelEvent(QWheelEvent *e) override {
@@ -536,6 +607,7 @@ private:
         actual.borrar = borrando;
         actual.forma = borrando ? int(plz::FORMA_LIBRE) : forma;   // el borrador siempre es libre
         actual.relleno = formaRelleno;
+        actual.recorte = selPoly;                  // si hay selección, solo se pinta dentro
         const Pincel &pb = pinceles()[pincelActual];
         QColor col = colorPincel;
         if (!borrando) col.setAlphaF(pb.opacidad);
@@ -552,6 +624,7 @@ private:
         antesTrazo.copiarDe(c->img);
         if (borrando) {
             respaldo.copiarDe(c->img);
+            relojBorrado.start();
             rectVivo = QRect();
             actualizarBorradoVivo();
         }
@@ -573,9 +646,14 @@ private:
         if ((dx * dx + dy * dy) * zoom * zoom < 2.25) return;
         actual.puntos.push_back({p.x(), p.y(), presion});
         actual.completo.push_back({p.x(), p.y(), presion});
-        // El borrador congela tramos cortos: borrar un contorno largo con antialiasing es lo más caro
-        // que hace el programa, y su coste crece con el largo del tramo vivo.
-        if (actual.puntos.size() >= (actual.borrar ? 40u : 250u)) {
+        // Borrar con antialiasing es lo más caro que hace el programa y su coste crece con el área del
+        // tramo vivo. Se junta el trabajo (como mucho una actualización cada 8 ms; los puntos se guardan
+        // todos) y se congela antes cuanto más área cubre el borrado.
+        if (actual.borrar && relojBorrado.isValid() && relojBorrado.elapsed() < 8) return;
+        if (actual.borrar) relojBorrado.restart();
+        const bool tramoGrande = actual.borrar && actual.puntos.size() >= 16 &&
+                                 qint64(rectVivo.width()) * rectVivo.height() > 150000;
+        if (actual.puntos.size() >= (actual.borrar ? 40u : 250u) || tramoGrande) {
             congelarTramo();
         } else {
             contornoVivo = puente::aPath(plz::calcularContorno(actual, false));
@@ -589,11 +667,12 @@ private:
         Capa &c = doc.capas[std::size_t(idxDibujo)];
         plz::Contorno cc = plz::calcularContorno(actual, true);
         if (actual.borrar) restaurarVivo(c);
-        puente::pintarContorno(c.img, cc, QColor::fromRgba(actual.color), actual.borrar);
+        puente::pintarContorno(c.img, cc, QColor::fromRgba(actual.color), actual.borrar, &actual.recorte);
         const QRect zonaCc = puente::rectDeContorno(cc);
         congelados.push_back(std::move(cc));
         if (actual.borrar) { respaldo.copiarRegionDe(c.img, puente::aRect(zonaCc)); rectVivo = QRect(); }
-        std::vector<plz::Punto> resto(actual.puntos.end() - 12, actual.puntos.end());
+        const std::ptrdiff_t solape = actual.borrar ? 8 : 12;
+        std::vector<plz::Punto> resto(actual.puntos.end() - solape, actual.puntos.end());
         actual.puntos = resto;
         contornoVivo = puente::aPath(plz::calcularContorno(actual, false));
         if (actual.borrar) actualizarBorradoVivo();
@@ -606,7 +685,7 @@ private:
         if (actual.forma) {
             actual.contornos = plz::contornosDeForma(actual);
             if (!actual.contornos.empty()) {
-                puente::pintarContornos(c.img, actual.contornos, QColor::fromRgba(actual.color), false);
+                puente::pintarContornos(c.img, actual.contornos, QColor::fromRgba(actual.color), false, &actual.recorte);
                 doc.registrarTrazo(c.id, std::move(actual), antesTrazo);
             }
             actual = Trazo();
@@ -618,7 +697,7 @@ private:
         }
         if (actual.borrar) restaurarVivo(c);
         plz::Contorno ultimo = plz::calcularContorno(actual, true);
-        puente::pintarContorno(c.img, ultimo, QColor::fromRgba(actual.color), actual.borrar);
+        puente::pintarContorno(c.img, ultimo, QColor::fromRgba(actual.color), actual.borrar, &actual.recorte);
         actual.contornos = std::move(congelados);
         actual.contornos.push_back(std::move(ultimo));
         actual.puntos.clear();
@@ -661,6 +740,7 @@ private:
             g.setRenderHint(QPainter::Antialiasing);
             g.setPen(Qt::NoPen);
             g.setBrush(Qt::black);
+            if (!actual.recorte.empty()) g.setClipPath(puente::aPoligono(actual.recorte));
             g.drawPath(contornoVivo);                                          // 2) borra con el contorno actual
         }
         c.img.tocar(puente::aRect(sucia));
@@ -675,6 +755,45 @@ private:
                               .arg(qRound(zoom * 100)).arg(doc.ancho).arg(doc.alto));
     }
 
+    bool capaEditable() {
+        const Capa &c = doc.capas[std::size_t(doc.activa)];
+        if (c.bloqueada || !c.visible) {
+            if (alCambiarInfo) alCambiarInfo("La capa activa está oculta o bloqueada");
+            return false;
+        }
+        return true;
+    }
+    void fijarSeleccion(plz::Seleccion s, plz::Contorno poly) {
+        sel = std::move(s);
+        selPoly = std::move(poly);
+        update();
+    }
+    void iniciarSel(const QPointF &p) { seleccionando = true; selA = selB = p; selPuntos = {p}; update(); }
+    void moverSel(const QPointF &p) {
+        selB = p;
+        if (modoSel == 2 && QLineF(selPuntos.back(), p).length() * zoom > 2) selPuntos.push_back(p);
+        update();
+    }
+    void terminarSel() {
+        if (!seleccionando) return;
+        seleccionando = false;
+        if (modoSel == 1) {
+            const QRectF r = QRectF(selA, selB).normalized();
+            const int x0 = std::clamp(int(std::floor(r.left())), 0, doc.ancho), y0 = std::clamp(int(std::floor(r.top())), 0, doc.alto);
+            const int x1 = std::clamp(int(std::ceil(r.right())), 0, doc.ancho), y1 = std::clamp(int(std::ceil(r.bottom())), 0, doc.alto);
+            if (x1 - x0 < 2 || y1 - y0 < 2) { deseleccionar(); return; }       // un clic quita la selección
+            fijarSeleccion(plz::Seleccion::rectangulo(doc.ancho, doc.alto, plz::Rect{x0, y0, x1, y1}),
+                           {{double(x0), double(y0)}, {double(x1), double(y0)}, {double(x1), double(y1)}, {double(x0), double(y1)}});
+        } else {
+            if (selPuntos.size() < 3) { deseleccionar(); return; }
+            plz::Contorno poly;
+            for (const QPointF &q : selPuntos) poly.push_back({q.x(), q.y()});
+            plz::Seleccion s = plz::Seleccion::poligono(doc.ancho, doc.alto, poly);
+            if (s.vacia()) { deseleccionar(); return; }
+            fijarSeleccion(std::move(s), std::move(poly));
+        }
+    }
+
     void rellenarEn(const QPointF &d) {
         if (dibujando) return;
         const int x = int(std::floor(d.x())), y = int(std::floor(d.y()));
@@ -687,7 +806,7 @@ private:
         QColor col = colorPincel;
         col.setAlpha(255);
         const plz::OpcionesRelleno o{cubo.tolerancia, 1};
-        if (doc.rellenar(doc.activa, x, y, col.rgba(), o, cubo.todasCapas)) { info(); update(); }
+        if (doc.rellenar(doc.activa, x, y, col.rgba(), o, cubo.todasCapas, sel.vacia() ? nullptr : &sel)) { info(); update(); }
         else if (alCambiarInfo) alCambiarInfo("Nada que rellenar ahí");
     }
 

@@ -13,15 +13,16 @@ add_library(plz_core STATIC
     core/historial.cpp
     core/comandos.cpp
     core/relleno.cpp
+    core/seleccion.cpp
     core/documento.h core/historial.h core/comandos.h
-    core/imagen.h core/mezcla.h core/trazo.h core/freehand.h core/relleno.h
+    core/imagen.h core/mezcla.h core/trazo.h core/freehand.h core/relleno.h core/seleccion.h
 )
 target_include_directories(plz_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # ---------- pruebas ----------
 if(PLZ_BUILD_TESTS)
     enable_testing()
-    add_executable(plz_tests tests/test_main.cpp tests/test_documento.cpp tests/test_relleno.cpp)
+    add_executable(plz_tests tests/test_main.cpp tests/test_documento.cpp tests/test_relleno.cpp tests/test_seleccion.cpp)
     target_link_libraries(plz_tests PRIVATE plz_core)
     add_test(NAME core COMMAND plz_tests)
 endif()

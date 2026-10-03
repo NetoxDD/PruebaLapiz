@@ -89,7 +89,7 @@ Relleno calcularRelleno(const Imagen &im, int sx, int sy, const OpcionesRelleno 
 }
 
 void aplicarRelleno(Imagen &img, const Relleno &r) {
-    const Pixel c = premultiplicar(r.color);
+    const Pixel c = r.borrar ? TRANSPARENTE : premultiplicar(r.color);
     Rect sucia;
     for (const Span &s : r.nucleo) {
         if (s.y < 0 || s.y >= img.h) continue;
@@ -98,6 +98,7 @@ void aplicarRelleno(Imagen &img, const Relleno &r) {
         sucia.unir(Rect{x0, s.y, x1 + 1, s.y + 1});
     }
     for (const Span &s : r.borde) {
+        if (r.borrar) break;
         if (s.y < 0 || s.y >= img.h) continue;
         const int x0 = std::max(0, s.x0), x1 = std::min(img.w - 1, s.x1);
         for (int x = x0; x <= x1; ++x) img.en(x, s.y) = sobre(c, img.en(x, s.y));   // color debajo de lo que hay

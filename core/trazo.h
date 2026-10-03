@@ -29,6 +29,7 @@ struct Trazo {
     double streamline = 0.5;
     bool simular = false;          // true con mouse: presión simulada por velocidad
     bool borrar = false;           // true = borra en vez de pintar
+    Contorno recorte;              // polígono de la selección activa al dibujar (vacío = sin recorte)
     std::vector<Contorno> contornos;   // tramos ya calculados; se pintan juntos (relleno WindingFill)
 };
 

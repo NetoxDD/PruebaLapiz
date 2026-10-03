@@ -27,6 +27,11 @@ inline QJsonObject trazoAJson(const plz::Trazo &t) {
     o["simular"] = t.simular;
     o["borrar"] = t.borrar;
     if (t.forma) { o["forma"] = t.forma; o["relleno"] = t.relleno; }
+    if (!t.recorte.empty()) {
+        QJsonArray r;
+        for (const pf::Vec &v : t.recorte) { r.append(v.x); r.append(v.y); }
+        o["recorte"] = r;
+    }
     o["puntos"] = pts;
     return o;
 }
@@ -42,6 +47,8 @@ inline bool trazoDeJson(const QJsonObject &o, plz::Trazo &t) {
     t.borrar = o["borrar"].toBool();
     t.forma = o["forma"].toInt(0);
     t.relleno = o["relleno"].toBool();
+    const QJsonArray rc = o["recorte"].toArray();
+    for (int i = 0; i + 1 < rc.size(); i += 2) t.recorte.push_back({rc[i].toDouble(), rc[i + 1].toDouble()});
     for (int i = 0; i + 2 < pts.size(); i += 3)
         t.completo.push_back({pts[i].toDouble(), pts[i + 1].toDouble(), pts[i + 2].toDouble()});
     t.puntos = t.completo;
@@ -62,6 +69,7 @@ inline std::vector<plz::Span> spansDeJson(const QJsonArray &a) {
 inline QJsonObject rellenoAJson(const plz::Relleno &r) {
     QJsonObject o;
     o["tipo"] = "relleno";
+    if (r.borrar) o["borrar"] = true;
     o["color"] = QColor::fromRgba(r.color).name(QColor::HexArgb);
     o["nucleo"] = spansAJson(r.nucleo);
     o["borde"] = spansAJson(r.borde);
@@ -69,9 +77,23 @@ inline QJsonObject rellenoAJson(const plz::Relleno &r) {
 }
 inline bool rellenoDeJson(const QJsonObject &o, plz::Relleno &r) {
     r.color = QColor(o["color"].toString()).rgba();
+    r.borrar = o["borrar"].toBool();
     r.nucleo = spansDeJson(o["nucleo"].toArray());
     r.borde = spansDeJson(o["borde"].toArray());
     return !r.nucleo.empty();
+}
+
+inline QJsonObject pegadoAJson(const plz::Pegado &p) {
+    QByteArray bytes;
+    QBuffer buf(&bytes);
+    buf.open(QIODevice::WriteOnly);
+    puente::lectura(p.img).save(&buf, "PNG");
+    QJsonObject o;
+    o["tipo"] = "pegado";
+    o["x"] = p.x;
+    o["y"] = p.y;
+    o["imagen"] = QString::fromLatin1(bytes.toBase64());
+    return o;
 }
 
 inline bool guardar(const plz::Documento &doc, const QString &ruta) {
@@ -80,7 +102,8 @@ inline bool guardar(const plz::Documento &doc, const QString &ruta) {
         QJsonArray arr;
         for (const plz::Operacion &op : c.ops) {
             if (const plz::Trazo *t = std::get_if<plz::Trazo>(&op)) arr.append(trazoAJson(*t));
-            else arr.append(rellenoAJson(std::get<plz::Relleno>(op)));
+            else if (const plz::Relleno *r = std::get_if<plz::Relleno>(&op)) arr.append(rellenoAJson(*r));
+            else arr.append(pegadoAJson(std::get<plz::Pegado>(op)));
         }
         QJsonObject o;
         o["nombre"] = QString::fromStdString(c.nombre);
@@ -138,6 +161,15 @@ inline bool abrir(plz::Documento &doc, const QString &ruta) {
                 if (!rellenoDeJson(o, r)) continue;
                 plz::aplicarRelleno(c.img, r);
                 c.ops.push_back(std::move(r));
+                continue;
+            }
+            if (o["tipo"].toString() == "pegado") {
+                QImage im;
+                im.loadFromData(QByteArray::fromBase64(o["imagen"].toString().toLatin1()), "PNG");
+                if (im.isNull()) continue;
+                plz::Pegado p{o["x"].toInt(), o["y"].toInt(), puente::aImagen(im)};
+                plz::aplicarPegado(c.img, p);
+                c.ops.push_back(std::move(p));
                 continue;
             }
             plz::Trazo t;

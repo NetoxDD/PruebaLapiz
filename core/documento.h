@@ -7,12 +7,20 @@
 #include "historial.h"
 #include "imagen.h"
 #include "relleno.h"
+#include "seleccion.h"
 #include "trazo.h"
 
 namespace plz {
 
 // Lo que se ha hecho en una capa, en orden: es lo que se guarda en el archivo
-using Operacion = std::variant<Trazo, Relleno>;
+// Una imagen pegada con su esquina en (x, y)
+struct Pegado {
+    int x = 0, y = 0;
+    Imagen img;
+};
+void aplicarPegado(Imagen &dst, const Pegado &p);
+
+using Operacion = std::variant<Trazo, Relleno, Pegado>;
 
 struct Capa {
     int id = 0;
@@ -74,7 +82,13 @@ public:
     void registrarTrazo(int capaId, Trazo t, const Imagen &antes);
     // Cubo de relleno en el punto (x, y) de la capa i. Con todasLasCapas mira la imagen combinada para
     // decidir la zona (siempre pinta solo en la capa i). false si no hay nada que rellenar.
-    bool rellenar(int i, int x, int y, std::uint32_t color, const OpcionesRelleno &o, bool todasLasCapas);
+    bool rellenar(int i, int x, int y, std::uint32_t color, const OpcionesRelleno &o, bool todasLasCapas,
+                  const Seleccion *sel = nullptr);   // con sel, solo rellena dentro de la selección
+
+    // --- Selección: borrar, copiar y pegar (borrar y pegar entran en el historial) ---
+    bool borrarSeleccion(int i, const Seleccion &s);
+    Imagen copiarSeleccion(int i, const Seleccion &s) const;   // la caja de la selección; lo de fuera, transparente
+    bool pegar(int i, Imagen img, int x, int y);
 
     bool deshacer() { return historial.deshacer(*this); }
     bool rehacer() { return historial.rehacer(*this); }

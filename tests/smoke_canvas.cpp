@@ -256,6 +256,65 @@ int main(int argc, char **argv) {
         c.forma = plz::FORMA_LIBRE;
     }
 
+    // 13) Selección: borrar, recorte de trazos, lazo, copiar/pegar y guardado
+    {
+        auto cuenta = [&](const char *n, QColor col) {
+            c.exportarPNG(T(n)); const QImage im(T(n)); QRect r; int k = 0;
+            for (int y = 0; y < im.height(); ++y) for (int x = 0; x < im.width(); ++x)
+                if (im.pixelColor(x, y) == col) { ++k; r = r.united(QRect(x, y, 1, 1)); }
+            return std::make_pair(k, r);
+        };
+        auto arrastrar = [&](std::initializer_list<QPoint> ps) {
+            auto it = ps.begin(); QTest::mousePress(&c, Qt::LeftButton, {}, *it);
+            for (++it; it != ps.end(); ++it) for (int i = 1; i <= 6; ++i) QTest::mouseMove(&c, *it);
+            QTest::mouseRelease(&c, Qt::LeftButton, {}, *(ps.end() - 1));
+        };
+        c.nuevoLienzo(800, 600); c.ajustar(); c.setBorrador(false); c.setCubo(false); c.forma = plz::FORMA_LIBRE;
+        c.setColor(Qt::red); c.setCubo(true); c.cubo.todasCapas = false; c.cubo.tolerancia = 30;
+        QTest::mouseClick(&c, Qt::LeftButton, {}, QPoint(450, 350)); c.setCubo(false);
+        c.setSeleccion(1); arrastrar({QPoint(300, 250), QPoint(500, 400)}); c.setSeleccion(0);
+        CHECK(c.haySeleccion());
+        c.borrarSel();
+        auto [kb, rb] = cuenta("s1.png", Qt::white);                       // lo borrado queda blanco
+        CHECK(kb > 20000 && kb < 45000);
+        CHECK(QImage(T("s1.png")).pixelColor(5, 5) == QColor(Qt::red));
+        c.deshacer();
+        CHECK(cuenta("s2.png", Qt::white).first == 0);
+        c.setColor(Qt::blue); c.setGrosor(30);                              // un trazo que cruza el borde de la selección
+        arrastrar({QPoint(200, 325), QPoint(600, 325)});
+        auto [kz, rz] = cuenta("s3.png", Qt::blue);
+        CHECK(kz > 500);
+        CHECK(rz.left() >= rb.left() - 1 && rz.right() <= rb.right() + 1);  // no se sale de la selección
+        // lazo triangular
+        c.deshacer(); c.deseleccionar();
+        c.setSeleccion(2); arrastrar({QPoint(100, 100), QPoint(260, 100), QPoint(100, 260), QPoint(100, 102)}); c.setSeleccion(0);
+        CHECK(c.haySeleccion());
+        c.borrarSel();
+        auto [kl, rl] = cuenta("s4.png", Qt::white);
+        CHECK(kl > 8000 && kl < 22000 && kl < rl.width() * rl.height() * 0.65);   // triángulo, no cuadrado
+        // copiar y pegar (portapapeles del sistema), con deshacer y guardado
+        c.nuevoLienzo(800, 600); c.ajustar();
+        c.setColor(Qt::red); c.forma = plz::FORMA_RECT; c.formaRelleno = true;
+        arrastrar({QPoint(300, 250), QPoint(400, 330)}); c.forma = plz::FORMA_LIBRE;
+        c.setSeleccion(1); arrastrar({QPoint(280, 230), QPoint(420, 350)}); c.setSeleccion(0);
+        c.copiar(false);
+        c.deseleccionar(); c.nuevaCapa();
+        QTest::mouseMove(&c, QPoint(620, 470));
+        const int antes = cuenta("s5.png", Qt::red).first;
+        c.pegar();
+        const int despues = cuenta("s6.png", Qt::red).first;
+        std::printf("pegar: %d rojos antes, %d despues\n", antes, despues);
+        CHECK(despues > antes * 18 / 10);
+        c.deshacer();
+        CHECK(cuenta("s7.png", Qt::red).first == antes);
+        c.rehacer();
+        CHECK(c.guardar(T("sel.json")));
+        c.nuevoLienzo(300, 300);
+        CHECK(c.abrir(T("sel.json")));
+        const int tras = cuenta("s8.png", Qt::red).first;
+        CHECK(std::abs(tras - despues) <= despues / 200);
+    }
+
     std::printf(fallos ? "\n%d FALLOS\n" : "\nSMOKE OK\n", fallos);
     return fallos ? 1 : 0;
 }

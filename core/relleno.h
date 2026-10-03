@@ -12,6 +12,7 @@ struct Span { int y, x0, x1; };   // fila y, columnas x0..x1 (ambas incluidas)
 // o abrir el archivo da siempre lo mismo aunque las demás capas hayan cambiado.
 struct Relleno {
     std::uint32_t color = 0xFF000000;   // ARGB sin premultiplicar
+    bool borrar = false;                // true: el núcleo se deja transparente (borrar selección)
     std::vector<Span> nucleo;           // pixeles parecidos a la semilla: se reemplazan por el color
     std::vector<Span> borde;            // franja extra: el color queda DEBAJO (cubre el halo del antialiasing)
 };

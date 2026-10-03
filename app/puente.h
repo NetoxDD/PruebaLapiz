@@ -8,6 +8,7 @@
 #include <QRectF>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 #include "core/imagen.h"
 #include "core/trazo.h"
@@ -67,6 +68,25 @@ inline QPainterPath aPath(const plz::Contorno &c) {
     return path;
 }
 
+// Polígono con lados rectos (selección y recorte)
+inline QPainterPath aPoligono(const plz::Contorno &c) {
+    QPainterPath path;
+    if (c.empty()) return path;
+    path.moveTo(c[0].x, c[0].y);
+    for (size_t i = 1; i < c.size(); ++i) path.lineTo(c[i].x, c[i].y);
+    path.closeSubpath();
+    return path;
+}
+
+// QImage -> Imagen del core (formato premultiplicado)
+inline plz::Imagen aImagen(const QImage &src) {
+    const QImage q = src.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    plz::Imagen im(q.width(), q.height());
+    for (int y = 0; y < q.height(); ++y)
+        std::memcpy(&im.px[size_t(y) * size_t(q.width())], q.constScanLine(y), size_t(q.width()) * sizeof(plz::Pixel));
+    return im;
+}
+
 inline QPainterPath aPathMulti(const std::vector<plz::Contorno> &cs) {
     QPainterPath path;
     path.setFillRule(Qt::WindingFill);
@@ -76,7 +96,7 @@ inline QPainterPath aPathMulti(const std::vector<plz::Contorno> &cs) {
 
 // Pinta (o borra) varios contornos como una sola forma sobre la imagen
 inline void pintarContornos(plz::Imagen &img, const std::vector<plz::Contorno> &cs,
-                            const QColor &color, bool borrar) {
+                            const QColor &color, bool borrar, const plz::Contorno *recorte = nullptr) {
     QPainterPath path;
     path.setFillRule(Qt::WindingFill);
     for (const plz::Contorno &c : cs) agregarContorno(path, c);
@@ -85,6 +105,7 @@ inline void pintarContornos(plz::Imagen &img, const std::vector<plz::Contorno> &
         QPainter g(&v);
         g.setRenderHint(QPainter::Antialiasing);
         g.setPen(Qt::NoPen);
+        if (recorte && !recorte->empty()) g.setClipPath(aPoligono(*recorte));   // solo dentro de la selección
         g.setBrush(borrar ? QColor(Qt::black) : color);
         g.setCompositionMode(borrar ? QPainter::CompositionMode_DestinationOut
                                     : QPainter::CompositionMode_SourceOver);
@@ -92,8 +113,9 @@ inline void pintarContornos(plz::Imagen &img, const std::vector<plz::Contorno> &
     }
     img.tocar(aRect(path.boundingRect().toAlignedRect().adjusted(-2, -2, 2, 2)));   // solo lo que cambió
 }
-inline void pintarContorno(plz::Imagen &img, const plz::Contorno &c, const QColor &color, bool borrar) {
-    pintarContornos(img, std::vector<plz::Contorno>{c}, color, borrar);
+inline void pintarContorno(plz::Imagen &img, const plz::Contorno &c, const QColor &color, bool borrar,
+                           const plz::Contorno *recorte = nullptr) {
+    pintarContornos(img, std::vector<plz::Contorno>{c}, color, borrar, recorte);
 }
 
 // Dibuja una QImage dentro de la Imagen (para plantillas)

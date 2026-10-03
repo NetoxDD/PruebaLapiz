@@ -521,6 +521,20 @@ int main(int argc, char *argv[]) {
     });
 
     // ---------- Ver ----------
+    QMenu *mEditar = ventana.menuBar()->addMenu("&Editar");
+    auto accionEditar = [&](const QString &texto, const QKeySequence &tecla, std::function<void()> f) {
+        QAction *a = mEditar->addAction(texto);
+        a->setShortcut(tecla);
+        QObject::connect(a, &QAction::triggered, [f]() { f(); });
+    };
+    accionEditar("Copiar", QKeySequence(Qt::CTRL | Qt::Key_C), [=]() { canvas->copiar(false); });
+    accionEditar("Cortar", QKeySequence(Qt::CTRL | Qt::Key_X), [=]() { canvas->copiar(true); });
+    accionEditar("Pegar", QKeySequence(Qt::CTRL | Qt::Key_V), [=]() { canvas->pegar(); });
+    accionEditar("Borrar selección", QKeySequence(Qt::Key_Delete), [=]() { canvas->borrarSel(); });
+    mEditar->addSeparator();
+    accionEditar("Seleccionar todo", QKeySequence(Qt::CTRL | Qt::Key_A), [=]() { canvas->seleccionarTodo(); });
+    accionEditar("Deseleccionar", QKeySequence(Qt::CTRL | Qt::Key_D), [=]() { canvas->deseleccionar(); });
+
     QMenu *mVer = ventana.menuBar()->addMenu("&Ver");
 
     QAction *aAcercar = mVer->addAction("Acercar");
@@ -659,6 +673,29 @@ int main(int argc, char *argv[]) {
     });
     QObject::connect(cRelleno, &QCheckBox::toggled, [=](bool b) { canvas->formaRelleno = b; });
 
+    QAction *aSel = barra->addAction("Selección");
+    aSel->setCheckable(true);
+    aSel->setShortcut(QKeySequence(Qt::Key_M));
+    aSel->setToolTip("Selección (M). Un clic fuera la quita.");
+    QComboBox *cSel = new QComboBox;
+    cSel->addItems({"Rectángulo", "Lazo"});
+    cSel->setFocusPolicy(Qt::NoFocus);
+    QAction *aOpcionesSel = barra->addWidget(cSel);
+    aOpcionesSel->setVisible(false);
+    auto aplicarSel = [=]() { canvas->setSeleccion(aSel->isChecked() ? cSel->currentIndex() + 1 : 0); };
+    QObject::connect(aSel, &QAction::toggled, [=](bool on) {
+        aOpcionesSel->setVisible(on);
+        if (on) { aBorrador->setChecked(false); aGotero->setChecked(false); aCubo->setChecked(false); }
+        aplicarSel();
+    });
+    QObject::connect(cSel, &QComboBox::currentIndexChanged, [=](int) { aplicarSel(); });
+    // las demás herramientas apagan la selección (la zona seleccionada se conserva)
+    QObject::connect(aBorrador, &QAction::toggled, [=](bool a) { if (a) aSel->setChecked(false); });
+    QObject::connect(aGotero, &QAction::toggled, [=](bool a) { if (a) aSel->setChecked(false); });
+    QObject::connect(aCubo, &QAction::toggled, [=](bool a) { if (a) aSel->setChecked(false); });
+    QObject::connect(cPincel, &QComboBox::currentIndexChanged, [=](int) { aSel->setChecked(false); });
+    QObject::connect(cForma, &QComboBox::currentIndexChanged, [=](int i) { if (i) aSel->setChecked(false); });
+
     QAction *aTableta = barra->addAction("Tableta...");
     QObject::connect(aTableta, &QAction::triggered, [=]() {
         dlg->show();
@@ -673,7 +710,8 @@ int main(int argc, char *argv[]) {
     QObject::connect(aDeshacer, &QAction::triggered, [=]() { canvas->deshacer(); });
 
     QAction *aRehacer = barra->addAction("Rehacer");
-    aRehacer->setShortcuts({QKeySequence::Redo, QKeySequence(Qt::CTRL | Qt::Key_Y)});
+    // OJO: no repetir la misma secuencia en una acción (Qt la marca "ambigua" y no se dispara nunca)
+    aRehacer->setShortcuts({QKeySequence(Qt::CTRL | Qt::Key_Y), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z)});
     QObject::connect(aRehacer, &QAction::triggered, [=]() { canvas->rehacer(); });
 
     // ---------- Selector de color (espectro RGB) ----------

@@ -88,13 +88,16 @@ void Documento::registrarTrazo(int capaId, Trazo t, const Imagen &antes) {
     historial.registrar(std::move(cmd));
 }
 
-bool Documento::rellenar(int i, int x, int y, std::uint32_t color, const OpcionesRelleno &o, bool todasLasCapas) {
+bool Documento::rellenar(int i, int x, int y, std::uint32_t color, const OpcionesRelleno &o, bool todasLasCapas,
+                         const Seleccion *sel) {
     if (!indiceValido(i)) return false;
     Capa &c = capas[std::size_t(i)];
     Imagen combinada;
     if (todasLasCapas) combinada = componer(true);
     const Imagen &muestra = todasLasCapas ? combinada : c.img;
+    if (sel && !sel->contiene(x, y)) return false;
     Relleno r = calcularRelleno(muestra, x, y, o, color);
+    if (sel) r = recortarRelleno(r, *sel);
     if (r.nucleo.empty()) return false;
     const Rect zona = rectDeRelleno(r);
     Imagen antes = c.img.recortar(zona);
@@ -103,6 +106,54 @@ bool Documento::rellenar(int i, int x, int y, std::uint32_t color, const Opcione
     c.ops.push_back(std::move(r));
     historial.registrar(std::move(cmd));
     return true;
+}
+
+bool Documento::borrarSeleccion(int i, const Seleccion &s) {
+    if (!indiceValido(i) || s.vacia()) return false;
+    Capa &c = capas[std::size_t(i)];
+    Relleno r;
+    r.borrar = true;
+    r.nucleo = s.tramos();
+    const Rect zona = s.caja;
+    Imagen antes = c.img.recortar(zona);
+    aplicarRelleno(c.img, r);
+    auto cmd = std::make_unique<CmdOperacion>(c.id, zona, std::move(antes), c.img.recortar(zona));
+    c.ops.push_back(std::move(r));
+    historial.registrar(std::move(cmd));
+    return true;
+}
+
+Imagen Documento::copiarSeleccion(int i, const Seleccion &s) const {
+    if (!indiceValido(i) || s.vacia()) return Imagen();
+    Imagen out = capas[std::size_t(i)].img.recortar(s.caja);
+    for (int y = 0; y < out.h; ++y)
+        for (int x = 0; x < out.w; ++x)
+            if (!s.contiene(s.caja.x0 + x, s.caja.y0 + y)) out.en(x, y) = TRANSPARENTE;
+    return out;
+}
+
+bool Documento::pegar(int i, Imagen img, int x, int y) {
+    if (!indiceValido(i) || img.vacia()) return false;
+    Capa &c = capas[std::size_t(i)];
+    const Rect zona = Rect{x, y, x + img.w, y + img.h}.interseccion(c.img.rectTotal());
+    if (zona.vacio()) return false;
+    Imagen antes = c.img.recortar(zona);
+    Pegado p{x, y, std::move(img)};
+    aplicarPegado(c.img, p);
+    auto cmd = std::make_unique<CmdOperacion>(c.id, zona, std::move(antes), c.img.recortar(zona));
+    c.ops.push_back(std::move(p));
+    historial.registrar(std::move(cmd));
+    return true;
+}
+
+void aplicarPegado(Imagen &dst, const Pegado &p) {
+    const Rect zona = Rect{p.x, p.y, p.x + p.img.w, p.y + p.img.h}.interseccion(dst.rectTotal());
+    for (int yy = zona.y0; yy < zona.y1; ++yy)
+        for (int xx = zona.x0; xx < zona.x1; ++xx) {
+            const Pixel s = p.img.en(xx - p.x, yy - p.y);
+            if (s) dst.en(xx, yy) = sobre(dst.en(xx, yy), s);
+        }
+    dst.tocar(zona);
 }
 
 // ---------- Sin historial ----------
@@ -117,7 +168,8 @@ void Documento::reconstruir(Capa &c) {
     if (!c.base.vacia()) c.img.copiarDe(c.base); else c.img.llenar(TRANSPARENTE);
     for (const Operacion &op : c.ops) {
         if (const Trazo *t = std::get_if<Trazo>(&op)) { if (pintor) pintor(c.img, *t); }
-        else aplicarRelleno(c.img, std::get<Relleno>(op));
+        else if (const Relleno *r = std::get_if<Relleno>(&op)) aplicarRelleno(c.img, *r);
+        else aplicarPegado(c.img, std::get<Pegado>(op));
     }
     c.img.tocar();
 }
