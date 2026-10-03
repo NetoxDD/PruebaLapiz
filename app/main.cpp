@@ -566,6 +566,19 @@ int main(int argc, char *argv[]) {
         etiqueta->setText(QString(" %1 ").arg(v));
     });
 
+    // Atajos de tamaño: [ y ] (en teclado latino: , y .)
+    auto cambiarTamano = [=](int dir) {
+        const int v = tamano->value();
+        tamano->setValue(std::clamp(v + dir * std::max(1, v / 10), 1, 200));
+    };
+    for (int dir : {-1, 1}) {
+        QAction *a = new QAction(&ventana);
+        a->setShortcuts(dir < 0 ? QList<QKeySequence>{QKeySequence(Qt::Key_BracketLeft), QKeySequence(Qt::Key_Comma)}
+                                : QList<QKeySequence>{QKeySequence(Qt::Key_BracketRight), QKeySequence(Qt::Key_Period)});
+        ventana.addAction(a);
+        QObject::connect(a, &QAction::triggered, [=]() { cambiarTamano(dir); });
+    }
+
     barra->addSeparator();
 
     QAction *aBorrador = barra->addAction("Borrador");
@@ -630,6 +643,21 @@ int main(int argc, char *argv[]) {
     QObject::connect(aBorrador, &QAction::toggled, [=](bool a) { if (a) aCubo->setChecked(false); });
     QObject::connect(aGotero, &QAction::toggled, [=](bool a) { if (a) aCubo->setChecked(false); });
     QObject::connect(cPincel, &QComboBox::currentIndexChanged, [=](int) { aCubo->setChecked(false); });
+
+    barra->addWidget(new QLabel(" Forma: "));
+    QComboBox *cForma = new QComboBox;
+    cForma->addItems({"Libre", "Línea", "Rectángulo", "Elipse"});
+    cForma->setFocusPolicy(Qt::NoFocus);
+    cForma->setToolTip("Shift: líneas a 15°, cuadrado y círculo exactos");
+    barra->addWidget(cForma);
+    QCheckBox *cRelleno = new QCheckBox("Relleno");
+    cRelleno->setFocusPolicy(Qt::NoFocus);
+    barra->addWidget(cRelleno);
+    QObject::connect(cForma, &QComboBox::currentIndexChanged, [=](int i) {
+        canvas->forma = i;
+        if (i) aCubo->setChecked(false);
+    });
+    QObject::connect(cRelleno, &QCheckBox::toggled, [=](bool b) { canvas->formaRelleno = b; });
 
     QAction *aTableta = barra->addAction("Tableta...");
     QObject::connect(aTableta, &QAction::triggered, [=]() {

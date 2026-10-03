@@ -11,6 +11,7 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QKeyEvent>
+#include <QGuiApplication>
 #include <QPointingDevice>
 #include <functional>
 #include <map>
@@ -88,6 +89,8 @@ public:
         bool todasCapas = false;    // decidir la zona mirando todas las capas visibles
     };
     OpcionesCubo cubo;
+    int forma = plz::FORMA_LIBRE;   // línea, rectángulo o elipse en vez de trazo libre
+    bool formaRelleno = false;
     OpcionesLapiz lapiz;
     std::function<void(const QString &)> alCambiarInfo;
     std::function<void(const QString &)> alDatosLapiz;
@@ -531,6 +534,8 @@ private:
         actual = Trazo();
         actual.simular = simular;
         actual.borrar = borrando;
+        actual.forma = borrando ? int(plz::FORMA_LIBRE) : forma;   // el borrador siempre es libre
+        actual.relleno = formaRelleno;
         const Pincel &pb = pinceles()[pincelActual];
         QColor col = colorPincel;
         if (!borrando) col.setAlphaF(pb.opacidad);
@@ -540,6 +545,7 @@ private:
         actual.streamline = std::clamp(lapiz.suavizado + (borrando ? 0.0 : pb.suavizado), 0.0, 0.95);
         actual.puntos.push_back({p.x(), p.y(), presion});
         actual.completo.push_back({p.x(), p.y(), presion});
+        if (actual.forma) actual.completo.push_back({p.x(), p.y(), presion});   // inicio y fin del arrastre
         congelados.clear();
         contornoVivo = puente::aPath(plz::calcularContorno(actual, false));
         dibujando = true;
@@ -553,6 +559,15 @@ private:
     }
 
     void agregar(const QPointF &p, qreal presion) {
+        if (actual.forma) {                       // las formas solo siguen el punto final
+            plz::Punto fin{p.x(), p.y(), presion};
+            if (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier)
+                fin = plz::restringirForma(actual.forma, actual.completo[0], fin);
+            actual.completo[1] = fin;
+            contornoVivo = puente::aPathMulti(plz::contornosDeForma(actual));
+            update();
+            return;
+        }
         const plz::Punto &u = actual.puntos.back();
         const double dx = p.x() - u.x, dy = p.y() - u.y;
         if ((dx * dx + dy * dy) * zoom * zoom < 2.25) return;
@@ -588,6 +603,19 @@ private:
         if (!dibujando) return;
         dibujando = false;
         Capa &c = doc.capas[std::size_t(idxDibujo)];
+        if (actual.forma) {
+            actual.contornos = plz::contornosDeForma(actual);
+            if (!actual.contornos.empty()) {
+                puente::pintarContornos(c.img, actual.contornos, QColor::fromRgba(actual.color), false);
+                doc.registrarTrazo(c.id, std::move(actual), antesTrazo);
+            }
+            actual = Trazo();
+            congelados.clear();
+            contornoVivo = QPainterPath();
+            info();
+            update();
+            return;
+        }
         if (actual.borrar) restaurarVivo(c);
         plz::Contorno ultimo = plz::calcularContorno(actual, true);
         puente::pintarContorno(c.img, ultimo, QColor::fromRgba(actual.color), actual.borrar);

@@ -67,6 +67,13 @@ inline QPainterPath aPath(const plz::Contorno &c) {
     return path;
 }
 
+inline QPainterPath aPathMulti(const std::vector<plz::Contorno> &cs) {
+    QPainterPath path;
+    path.setFillRule(Qt::WindingFill);
+    for (const plz::Contorno &c : cs) agregarContorno(path, c);
+    return path;
+}
+
 // Pinta (o borra) varios contornos como una sola forma sobre la imagen
 inline void pintarContornos(plz::Imagen &img, const std::vector<plz::Contorno> &cs,
                             const QColor &color, bool borrar) {

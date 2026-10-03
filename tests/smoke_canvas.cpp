@@ -207,6 +207,55 @@ int main(int argc, char **argv) {
         CHECK(mal == 0);
     }
 
+    // 12) Formas: se mide la caja de píxeles rojos (no depende del zoom de la vista)
+    {
+        c.setBorrador(false); c.setCubo(false); c.setColor(Qt::red); c.setGrosor(6);
+        auto rojos = [&](const char *n) {
+            c.exportarPNG(T(n)); const QImage im(T(n)); QRect r; int k = 0;
+            for (int y = 0; y < im.height(); ++y) for (int x = 0; x < im.width(); ++x)
+                if (im.pixelColor(x, y) == QColor(Qt::red)) { ++k; r = r.united(QRect(x, y, 1, 1)); }
+            return std::make_pair(k, r);
+        };
+        auto arrastrar = [&](QPoint a, QPoint b) {
+            QTest::mousePress(&c, Qt::LeftButton, {}, a);
+            for (int i = 1; i <= 8; ++i) QTest::mouseMove(&c, a + (b - a) * i / 8);
+            QTest::mouseRelease(&c, Qt::LeftButton, {}, b);
+        };
+        // rectángulo relleno
+        c.nuevoLienzo(800, 600); c.ajustar(); c.forma = plz::FORMA_RECT; c.formaRelleno = true;
+        arrastrar({300, 250}, {500, 400});
+        auto [kr, rr] = rojos("f1.png");
+        CHECK(rr.width() > 150 && rr.height() > 110 && kr > rr.width() * rr.height() * 0.95);   // sólido
+        // elipse solo contorno: hueco en el centro, rojo en el borde
+        c.nuevoLienzo(800, 600); c.ajustar(); c.forma = plz::FORMA_ELIPSE; c.formaRelleno = false;
+        arrastrar({200, 200}, {500, 400});
+        auto [ke, re] = rojos("f2.png");
+        const QImage ie(T("f2.png"));
+        CHECK(re.width() > 250 && re.height() > 170);
+        CHECK(ie.pixelColor(re.center()) == QColor(Qt::white));
+        CHECK(ie.pixelColor(re.right() - 2, re.center().y()) == QColor(Qt::red));
+        CHECK(ke < re.width() * re.height() * 0.5);                                               // no es sólida
+        // línea: fina y horizontal; con Shift quedaría a 15°
+        c.nuevoLienzo(800, 600); c.ajustar(); c.forma = plz::FORMA_LINEA;
+        arrastrar({200, 300}, {600, 300});
+        auto [kl, rl] = rojos("f3.png");
+        CHECK(rl.width() > 300 && rl.height() < 12);
+        // deshacer y guardar/abrir
+        c.forma = plz::FORMA_RECT; c.formaRelleno = true; arrastrar({300, 400}, {400, 450});
+        const int antes = rojos("f4.png").first;
+        c.deshacer();
+        CHECK(rojos("f5.png").first == kl);
+        c.rehacer();
+        CHECK(rojos("f6.png").first == antes);
+        CHECK(c.guardar(T("formas.json")));
+        c.nuevoLienzo(300, 300);
+        CHECK(c.abrir(T("formas.json")));
+        const int tras = rojos("f7.png").first;
+        std::printf("formas: %d rojos antes de guardar, %d tras abrir\n", antes, tras);
+        CHECK(std::abs(tras - antes) <= antes / 200);          // el archivo redondea a 0.01 px: solo cambian píxeles del borde
+        c.forma = plz::FORMA_LIBRE;
+    }
+
     std::printf(fallos ? "\n%d FALLOS\n" : "\nSMOKE OK\n", fallos);
     return fallos ? 1 : 0;
 }

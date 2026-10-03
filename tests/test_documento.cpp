@@ -1,3 +1,5 @@
+#include <array>
+#include <cmath>
 #include "mini_test.h"
 #include "core/documento.h"
 #include "core/mezcla.h"
@@ -254,4 +256,34 @@ PRUEBA(cargar_reemplaza_y_limpia_historial) {
     VERIFICAR(!d.modificado() && !d.historial.puedeDeshacer());
     d.nuevaCapa();
     VERIFICAR(d.capas[2].id == 9);
+}
+
+PRUEBA(forma_linea_rect_elipse) {
+    auto caja = [](const std::vector<Contorno> &cs) {
+        double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+        for (auto &c : cs) for (auto &v : c) { x0 = std::min(x0, v.x); y0 = std::min(y0, v.y); x1 = std::max(x1, v.x); y1 = std::max(y1, v.y); }
+        return std::array<double, 4>{x0, y0, x1, y1};
+    };
+    Trazo t; t.grosor = 10; t.completo = {{10, 10, .5}, {100, 10, .5}};
+    t.forma = FORMA_LINEA;
+    auto b = caja(contornosDeForma(t));
+    VERIFICAR(b[0] < 10 && b[0] > 0 && b[2] > 100 && b[2] < 110 && b[1] < 10 && b[3] > 10);
+    t.forma = FORMA_RECT; t.relleno = true; t.completo = {{20, 30, .5}, {80, 90, .5}};
+    b = caja(contornosDeForma(t));
+    VERIFICAR(b[0] == 20 && b[1] == 30 && b[2] == 80 && b[3] == 90);
+    t.forma = FORMA_ELIPSE;
+    b = caja(contornosDeForma(t));
+    VERIFICAR(std::fabs(b[0] - 20) < 0.5 && std::fabs(b[2] - 80) < 0.5);
+    t.completo = {{5, 5, .5}, {5, 5, .5}};
+    VERIFICAR(contornosDeForma(t).empty());                         // sin tamaño no hay forma
+}
+
+PRUEBA(forma_shift_restringe) {
+    Punto a{0, 0, .5};
+    Punto l = restringirForma(FORMA_LINEA, a, {100, 3, .5});
+    VERIFICAR(std::fabs(l.y) < 1e-9 && l.x > 99);                   // casi horizontal -> horizontal
+    Punto d = restringirForma(FORMA_LINEA, a, {50, 52, .5});
+    VERIFICAR(std::fabs(d.x - d.y) < 1e-6);                         // casi diagonal -> 45°
+    Punto r = restringirForma(FORMA_RECT, a, {-40, 90, .5});
+    VERIFICAR(r.x == -90 && r.y == 90);                             // cuadrado, respetando el sentido
 }

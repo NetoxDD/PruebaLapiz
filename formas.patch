@@ -1,0 +1,352 @@
+diff --git a/app/archivo.h b/app/archivo.h
+index 1e65bae..949936b 100644
+--- a/app/archivo.h
++++ b/app/archivo.h
+@@ -26,6 +26,7 @@ inline QJsonObject trazoAJson(const plz::Trazo &t) {
+     o["suav"] = t.streamline;
+     o["simular"] = t.simular;
+     o["borrar"] = t.borrar;
++    if (t.forma) { o["forma"] = t.forma; o["relleno"] = t.relleno; }
+     o["puntos"] = pts;
+     return o;
+ }
+@@ -39,6 +40,8 @@ inline bool trazoDeJson(const QJsonObject &o, plz::Trazo &t) {
+     t.streamline = o["suav"].toDouble(0.5);
+     t.simular = o["simular"].toBool();
+     t.borrar = o["borrar"].toBool();
++    t.forma = o["forma"].toInt(0);
++    t.relleno = o["relleno"].toBool();
+     for (int i = 0; i + 2 < pts.size(); i += 3)
+         t.completo.push_back({pts[i].toDouble(), pts[i + 1].toDouble(), pts[i + 2].toDouble()});
+     t.puntos = t.completo;
+@@ -139,7 +142,7 @@ inline bool abrir(plz::Documento &doc, const QString &ruta) {
+             }
+             plz::Trazo t;
+             if (!trazoDeJson(o, t)) continue;
+-            t.contornos = {plz::calcularContorno(t, true)};
++            t.contornos = t.forma ? plz::contornosDeForma(t) : std::vector<plz::Contorno>{plz::calcularContorno(t, true)};
+             if (doc.pintor) doc.pintor(c.img, t);
+             c.ops.push_back(std::move(t));
+         }
+diff --git a/app/canvas.h b/app/canvas.h
+index f5b9e16..2434f3e 100644
+--- a/app/canvas.h
++++ b/app/canvas.h
+@@ -11,6 +11,7 @@
+ #include <QMouseEvent>
+ #include <QWheelEvent>
+ #include <QKeyEvent>
++#include <QGuiApplication>
+ #include <QPointingDevice>
+ #include <functional>
+ #include <map>
+@@ -88,6 +89,8 @@ public:
+         bool todasCapas = false;    // decidir la zona mirando todas las capas visibles
+     };
+     OpcionesCubo cubo;
++    int forma = plz::FORMA_LIBRE;   // línea, rectángulo o elipse en vez de trazo libre
++    bool formaRelleno = false;
+     OpcionesLapiz lapiz;
+     std::function<void(const QString &)> alCambiarInfo;
+     std::function<void(const QString &)> alDatosLapiz;
+@@ -531,6 +534,8 @@ private:
+         actual = Trazo();
+         actual.simular = simular;
+         actual.borrar = borrando;
++        actual.forma = borrando ? int(plz::FORMA_LIBRE) : forma;   // el borrador siempre es libre
++        actual.relleno = formaRelleno;
+         const Pincel &pb = pinceles()[pincelActual];
+         QColor col = colorPincel;
+         if (!borrando) col.setAlphaF(pb.opacidad);
+@@ -540,6 +545,7 @@ private:
+         actual.streamline = std::clamp(lapiz.suavizado + (borrando ? 0.0 : pb.suavizado), 0.0, 0.95);
+         actual.puntos.push_back({p.x(), p.y(), presion});
+         actual.completo.push_back({p.x(), p.y(), presion});
++        if (actual.forma) actual.completo.push_back({p.x(), p.y(), presion});   // inicio y fin del arrastre
+         congelados.clear();
+         contornoVivo = puente::aPath(plz::calcularContorno(actual, false));
+         dibujando = true;
+@@ -553,6 +559,15 @@ private:
+     }
+ 
+     void agregar(const QPointF &p, qreal presion) {
++        if (actual.forma) {                       // las formas solo siguen el punto final
++            plz::Punto fin{p.x(), p.y(), presion};
++            if (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier)
++                fin = plz::restringirForma(actual.forma, actual.completo[0], fin);
++            actual.completo[1] = fin;
++            contornoVivo = puente::aPathMulti(plz::contornosDeForma(actual));
++            update();
++            return;
++        }
+         const plz::Punto &u = actual.puntos.back();
+         const double dx = p.x() - u.x, dy = p.y() - u.y;
+         if ((dx * dx + dy * dy) * zoom * zoom < 2.25) return;
+@@ -588,6 +603,19 @@ private:
+         if (!dibujando) return;
+         dibujando = false;
+         Capa &c = doc.capas[std::size_t(idxDibujo)];
++        if (actual.forma) {
++            actual.contornos = plz::contornosDeForma(actual);
++            if (!actual.contornos.empty()) {
++                puente::pintarContornos(c.img, actual.contornos, QColor::fromRgba(actual.color), false);
++                doc.registrarTrazo(c.id, std::move(actual), antesTrazo);
++            }
++            actual = Trazo();
++            congelados.clear();
++            contornoVivo = QPainterPath();
++            info();
++            update();
++            return;
++        }
+         if (actual.borrar) restaurarVivo(c);
+         plz::Contorno ultimo = plz::calcularContorno(actual, true);
+         puente::pintarContorno(c.img, ultimo, QColor::fromRgba(actual.color), actual.borrar);
+diff --git a/app/main.cpp b/app/main.cpp
+index aa8e729..bcd37a8 100644
+--- a/app/main.cpp
++++ b/app/main.cpp
+@@ -566,6 +566,19 @@ int main(int argc, char *argv[]) {
+         etiqueta->setText(QString(" %1 ").arg(v));
+     });
+ 
++    // Atajos de tamaño: [ y ] (en teclado latino: , y .)
++    auto cambiarTamano = [=](int dir) {
++        const int v = tamano->value();
++        tamano->setValue(std::clamp(v + dir * std::max(1, v / 10), 1, 200));
++    };
++    for (int dir : {-1, 1}) {
++        QAction *a = new QAction(&ventana);
++        a->setShortcuts(dir < 0 ? QList<QKeySequence>{QKeySequence(Qt::Key_BracketLeft), QKeySequence(Qt::Key_Comma)}
++                                : QList<QKeySequence>{QKeySequence(Qt::Key_BracketRight), QKeySequence(Qt::Key_Period)});
++        ventana.addAction(a);
++        QObject::connect(a, &QAction::triggered, [=]() { cambiarTamano(dir); });
++    }
++
+     barra->addSeparator();
+ 
+     QAction *aBorrador = barra->addAction("Borrador");
+@@ -631,6 +644,21 @@ int main(int argc, char *argv[]) {
+     QObject::connect(aGotero, &QAction::toggled, [=](bool a) { if (a) aCubo->setChecked(false); });
+     QObject::connect(cPincel, &QComboBox::currentIndexChanged, [=](int) { aCubo->setChecked(false); });
+ 
++    barra->addWidget(new QLabel(" Forma: "));
++    QComboBox *cForma = new QComboBox;
++    cForma->addItems({"Libre", "Línea", "Rectángulo", "Elipse"});
++    cForma->setFocusPolicy(Qt::NoFocus);
++    cForma->setToolTip("Shift: líneas a 15°, cuadrado y círculo exactos");
++    barra->addWidget(cForma);
++    QCheckBox *cRelleno = new QCheckBox("Relleno");
++    cRelleno->setFocusPolicy(Qt::NoFocus);
++    barra->addWidget(cRelleno);
++    QObject::connect(cForma, &QComboBox::currentIndexChanged, [=](int i) {
++        canvas->forma = i;
++        if (i) aCubo->setChecked(false);
++    });
++    QObject::connect(cRelleno, &QCheckBox::toggled, [=](bool b) { canvas->formaRelleno = b; });
++
+     QAction *aTableta = barra->addAction("Tableta...");
+     QObject::connect(aTableta, &QAction::triggered, [=]() {
+         dlg->show();
+diff --git a/app/puente.h b/app/puente.h
+index fa18e03..418cfe2 100644
+--- a/app/puente.h
++++ b/app/puente.h
+@@ -67,6 +67,13 @@ inline QPainterPath aPath(const plz::Contorno &c) {
+     return path;
+ }
+ 
++inline QPainterPath aPathMulti(const std::vector<plz::Contorno> &cs) {
++    QPainterPath path;
++    path.setFillRule(Qt::WindingFill);
++    for (const plz::Contorno &c : cs) agregarContorno(path, c);
++    return path;
++}
++
+ // Pinta (o borra) varios contornos como una sola forma sobre la imagen
+ inline void pintarContornos(plz::Imagen &img, const std::vector<plz::Contorno> &cs,
+                             const QColor &color, bool borrar) {
+diff --git a/core/trazo.h b/core/trazo.h
+index 122cb60..029f530 100644
+--- a/core/trazo.h
++++ b/core/trazo.h
+@@ -16,7 +16,11 @@ struct Punto {
+ 
+ using Contorno = std::vector<pf::Vec>;   // polígono cerrado que rodea el trazo
+ 
++enum Forma { FORMA_LIBRE = 0, FORMA_LINEA, FORMA_RECT, FORMA_ELIPSE };
++
+ struct Trazo {
++    int forma = FORMA_LIBRE;       // si no es libre, 'completo' tiene solo 2 puntos: inicio y fin del arrastre
++    bool relleno = false;          // formas cerradas: relleno en vez de solo contorno
+     std::vector<Punto> puntos;     // tramo en curso (se recorta al congelar)
+     std::vector<Punto> completo;   // TODOS los puntos (lo que se guarda)
+     std::uint32_t color = 0xFF000000;   // ARGB sin premultiplicar (como QColor::rgba())
+@@ -44,6 +48,63 @@ inline Contorno calcularContorno(const Trazo &t, bool terminado) {
+     return pf::getStroke(entrada, o);
+ }
+ 
++// Con Shift: la línea salta de 15° en 15°; rectángulo y elipse se vuelven cuadrado y círculo
++inline Punto restringirForma(int forma, const Punto &a, Punto b) {
++    const double dx = b.x - a.x, dy = b.y - a.y;
++    if (forma == FORMA_LINEA) {
++        const double paso = 3.14159265358979323846 / 12.0;
++        const double ang = std::round(std::atan2(dy, dx) / paso) * paso, len = std::hypot(dx, dy);
++        b.x = a.x + len * std::cos(ang);
++        b.y = a.y + len * std::sin(ang);
++    } else if (forma == FORMA_RECT || forma == FORMA_ELIPSE) {
++        const double l = std::max(std::fabs(dx), std::fabs(dy));
++        b.x = a.x + (dx < 0 ? -l : l);
++        b.y = a.y + (dy < 0 ? -l : l);
++    }
++    return b;
++}
++
++// Contornos de una forma. Los bordes se trazan como una línea gruesa; con relleno se devuelve el polígono.
++inline std::vector<Contorno> contornosDeForma(const Trazo &t) {
++    std::vector<Contorno> res;
++    if (t.completo.size() < 2 || t.forma == FORMA_LIBRE) return res;
++    const Punto &a = t.completo.front(), &b = t.completo.back();
++    const double x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x), y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
++    std::vector<pf::Vec> ruta;
++    auto lado = [&](double ax, double ay, double bx, double by) {   // puntos cada ~2 px
++        const int n = std::max(1, int(std::ceil(std::hypot(bx - ax, by - ay) / 2.0)));
++        for (int i = 0; i < n; ++i) ruta.push_back({ax + (bx - ax) * i / n, ay + (by - ay) * i / n});
++    };
++    bool cerrada = false;
++    if (t.forma == FORMA_LINEA) {
++        lado(a.x, a.y, b.x, b.y);
++        ruta.push_back({b.x, b.y});
++    } else if (t.forma == FORMA_RECT) {
++        if (x1 - x0 < 1 || y1 - y0 < 1) return res;
++        lado(x0, y0, x1, y0); lado(x1, y0, x1, y1); lado(x1, y1, x0, y1); lado(x0, y1, x0, y0);
++        cerrada = true;
++    } else {
++        const double rx = (x1 - x0) / 2, ry = (y1 - y0) / 2;
++        if (rx < 0.5 || ry < 0.5) return res;
++        const double perim = 3.14159265358979323846 * (3 * (rx + ry) - std::sqrt((3 * rx + ry) * (rx + 3 * ry)));
++        const int n = std::clamp(int(perim / 2.0), 24, 1500);
++        for (int i = 0; i < n; ++i) {
++            const double ang = 2 * 3.14159265358979323846 * i / n;
++            ruta.push_back({x0 + rx + rx * std::cos(ang), y0 + ry + ry * std::sin(ang)});
++        }
++        cerrada = true;
++    }
++    if (t.relleno && cerrada) { res.push_back(ruta); return res; }
++    std::vector<pf::InPoint> entrada;
++    for (const pf::Vec &v : ruta) entrada.push_back({{v.x, v.y}, 0.5});
++    if (cerrada) entrada.push_back(entrada.front());
++    pf::Options o;
++    o.size = t.grosor; o.thinning = 0; o.smoothing = 0.5; o.streamline = 0;
++    o.simulatePressure = false; o.last = true;
++    res.push_back(pf::getStroke(entrada, o));
++    return res;
++}
++
+ // Zona de la capa que toca el trazo (con margen para el antialiasing), recortada al lienzo
+ inline Rect rectDeTrazo(const Trazo &t, int ancho, int alto) {
+     double x0 = 1e18, y0 = 1e18, x1 = -1e18, y1 = -1e18;
+diff --git a/tests/smoke_canvas.cpp b/tests/smoke_canvas.cpp
+index 4eb74ce..51cc5a4 100644
+--- a/tests/smoke_canvas.cpp
++++ b/tests/smoke_canvas.cpp
+@@ -207,6 +207,55 @@ int main(int argc, char **argv) {
+         CHECK(mal == 0);
+     }
+ 
++    // 12) Formas: se mide la caja de píxeles rojos (no depende del zoom de la vista)
++    {
++        c.setBorrador(false); c.setCubo(false); c.setColor(Qt::red); c.setGrosor(6);
++        auto rojos = [&](const char *n) {
++            c.exportarPNG(T(n)); const QImage im(T(n)); QRect r; int k = 0;
++            for (int y = 0; y < im.height(); ++y) for (int x = 0; x < im.width(); ++x)
++                if (im.pixelColor(x, y) == QColor(Qt::red)) { ++k; r = r.united(QRect(x, y, 1, 1)); }
++            return std::make_pair(k, r);
++        };
++        auto arrastrar = [&](QPoint a, QPoint b) {
++            QTest::mousePress(&c, Qt::LeftButton, {}, a);
++            for (int i = 1; i <= 8; ++i) QTest::mouseMove(&c, a + (b - a) * i / 8);
++            QTest::mouseRelease(&c, Qt::LeftButton, {}, b);
++        };
++        // rectángulo relleno
++        c.nuevoLienzo(800, 600); c.ajustar(); c.forma = plz::FORMA_RECT; c.formaRelleno = true;
++        arrastrar({300, 250}, {500, 400});
++        auto [kr, rr] = rojos("f1.png");
++        CHECK(rr.width() > 150 && rr.height() > 110 && kr > rr.width() * rr.height() * 0.95);   // sólido
++        // elipse solo contorno: hueco en el centro, rojo en el borde
++        c.nuevoLienzo(800, 600); c.ajustar(); c.forma = plz::FORMA_ELIPSE; c.formaRelleno = false;
++        arrastrar({200, 200}, {500, 400});
++        auto [ke, re] = rojos("f2.png");
++        const QImage ie(T("f2.png"));
++        CHECK(re.width() > 250 && re.height() > 170);
++        CHECK(ie.pixelColor(re.center()) == QColor(Qt::white));
++        CHECK(ie.pixelColor(re.right() - 2, re.center().y()) == QColor(Qt::red));
++        CHECK(ke < re.width() * re.height() * 0.5);                                               // no es sólida
++        // línea: fina y horizontal; con Shift quedaría a 15°
++        c.nuevoLienzo(800, 600); c.ajustar(); c.forma = plz::FORMA_LINEA;
++        arrastrar({200, 300}, {600, 300});
++        auto [kl, rl] = rojos("f3.png");
++        CHECK(rl.width() > 300 && rl.height() < 12);
++        // deshacer y guardar/abrir
++        c.forma = plz::FORMA_RECT; c.formaRelleno = true; arrastrar({300, 400}, {400, 450});
++        const int antes = rojos("f4.png").first;
++        c.deshacer();
++        CHECK(rojos("f5.png").first == kl);
++        c.rehacer();
++        CHECK(rojos("f6.png").first == antes);
++        CHECK(c.guardar(T("formas.json")));
++        c.nuevoLienzo(300, 300);
++        CHECK(c.abrir(T("formas.json")));
++        const int tras = rojos("f7.png").first;
++        std::printf("formas: %d rojos antes de guardar, %d tras abrir\n", antes, tras);
++        CHECK(std::abs(tras - antes) <= antes / 200);          // el archivo redondea a 0.01 px: solo cambian píxeles del borde
++        c.forma = plz::FORMA_LIBRE;
++    }
++
+     std::printf(fallos ? "\n%d FALLOS\n" : "\nSMOKE OK\n", fallos);
+     return fallos ? 1 : 0;
+ }
+diff --git a/tests/test_documento.cpp b/tests/test_documento.cpp
+index b96fab4..f675fd1 100644
+--- a/tests/test_documento.cpp
++++ b/tests/test_documento.cpp
+@@ -1,3 +1,5 @@
++#include <array>
++#include <cmath>
+ #include "mini_test.h"
+ #include "core/documento.h"
+ #include "core/mezcla.h"
+@@ -255,3 +257,33 @@ PRUEBA(cargar_reemplaza_y_limpia_historial) {
+     d.nuevaCapa();
+     VERIFICAR(d.capas[2].id == 9);
+ }
++
++PRUEBA(forma_linea_rect_elipse) {
++    auto caja = [](const std::vector<Contorno> &cs) {
++        double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
++        for (auto &c : cs) for (auto &v : c) { x0 = std::min(x0, v.x); y0 = std::min(y0, v.y); x1 = std::max(x1, v.x); y1 = std::max(y1, v.y); }
++        return std::array<double, 4>{x0, y0, x1, y1};
++    };
++    Trazo t; t.grosor = 10; t.completo = {{10, 10, .5}, {100, 10, .5}};
++    t.forma = FORMA_LINEA;
++    auto b = caja(contornosDeForma(t));
++    VERIFICAR(b[0] < 10 && b[0] > 0 && b[2] > 100 && b[2] < 110 && b[1] < 10 && b[3] > 10);
++    t.forma = FORMA_RECT; t.relleno = true; t.completo = {{20, 30, .5}, {80, 90, .5}};
++    b = caja(contornosDeForma(t));
++    VERIFICAR(b[0] == 20 && b[1] == 30 && b[2] == 80 && b[3] == 90);
++    t.forma = FORMA_ELIPSE;
++    b = caja(contornosDeForma(t));
++    VERIFICAR(std::fabs(b[0] - 20) < 0.5 && std::fabs(b[2] - 80) < 0.5);
++    t.completo = {{5, 5, .5}, {5, 5, .5}};
++    VERIFICAR(contornosDeForma(t).empty());                         // sin tamaño no hay forma
++}
++
++PRUEBA(forma_shift_restringe) {
++    Punto a{0, 0, .5};
++    Punto l = restringirForma(FORMA_LINEA, a, {100, 3, .5});
++    VERIFICAR(std::fabs(l.y) < 1e-9 && l.x > 99);                   // casi horizontal -> horizontal
++    Punto d = restringirForma(FORMA_LINEA, a, {50, 52, .5});
++    VERIFICAR(std::fabs(d.x - d.y) < 1e-6);                         // casi diagonal -> 45°
++    Punto r = restringirForma(FORMA_RECT, a, {-40, 90, .5});
++    VERIFICAR(r.x == -90 && r.y == 90);                             // cuadrado, respetando el sentido
++}

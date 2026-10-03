@@ -26,6 +26,7 @@ inline QJsonObject trazoAJson(const plz::Trazo &t) {
     o["suav"] = t.streamline;
     o["simular"] = t.simular;
     o["borrar"] = t.borrar;
+    if (t.forma) { o["forma"] = t.forma; o["relleno"] = t.relleno; }
     o["puntos"] = pts;
     return o;
 }
@@ -39,6 +40,8 @@ inline bool trazoDeJson(const QJsonObject &o, plz::Trazo &t) {
     t.streamline = o["suav"].toDouble(0.5);
     t.simular = o["simular"].toBool();
     t.borrar = o["borrar"].toBool();
+    t.forma = o["forma"].toInt(0);
+    t.relleno = o["relleno"].toBool();
     for (int i = 0; i + 2 < pts.size(); i += 3)
         t.completo.push_back({pts[i].toDouble(), pts[i + 1].toDouble(), pts[i + 2].toDouble()});
     t.puntos = t.completo;
@@ -139,7 +142,7 @@ inline bool abrir(plz::Documento &doc, const QString &ruta) {
             }
             plz::Trazo t;
             if (!trazoDeJson(o, t)) continue;
-            t.contornos = {plz::calcularContorno(t, true)};
+            t.contornos = t.forma ? plz::contornosDeForma(t) : std::vector<plz::Contorno>{plz::calcularContorno(t, true)};
             if (doc.pintor) doc.pintor(c.img, t);
             c.ops.push_back(std::move(t));
         }
