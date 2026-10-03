@@ -1,0 +1,99 @@
+#pragma once
+// Modelo del dibujo: capas, trazos e historial. Sin Qt.
+#include <functional>
+#include <string>
+#include <variant>
+#include <vector>
+#include "historial.h"
+#include "imagen.h"
+#include "relleno.h"
+#include "trazo.h"
+
+namespace plz {
+
+// Lo que se ha hecho en una capa, en orden: es lo que se guarda en el archivo
+using Operacion = std::variant<Trazo, Relleno>;
+
+struct Capa {
+    int id = 0;
+    std::string nombre;
+    bool visible = true;
+    bool bloqueada = false;
+    bool esPlantilla = false;
+    double opacidad = 1.0;
+    Imagen img;                    // pixeles actuales
+    Imagen base;                   // pixeles de partida (plantillas); vacía = transparente
+    std::vector<Operacion> ops;    // trazos y rellenos que la forman (base del guardado)
+
+    Capa() = default;
+    Capa(int id_, std::string n, int w, int h) : id(id_), nombre(std::move(n)), img(w, h) {}
+};
+
+// Propiedades de capa que entran en el historial
+struct PropCapa {
+    std::string nombre;
+    bool bloqueada = false;
+    double opacidad = 1.0;
+    bool operator==(const PropCapa &o) const {
+        return nombre == o.nombre && bloqueada == o.bloqueada && opacidad == o.opacidad;
+    }
+};
+
+class Documento {
+public:
+    // La interfaz inyecta aquí cómo se rasteriza un trazo sobre una imagen.
+    using Pintor = std::function<void(Imagen &, const Trazo &)>;
+
+    int ancho = 2000, alto = 1500;
+    std::vector<Capa> capas;       // índice 0 = la de más abajo
+    int activa = 0;
+    int siguienteId = 1;
+    Historial historial;
+    Pintor pintor;
+    bool sucioExtra = false;       // cambios que no entran en el historial (p. ej. visibilidad)
+
+    explicit Documento(int w = 2000, int h = 1500) { reiniciar(w, h); }
+
+    void reiniciar(int w, int h);
+    // Sustituye todo el contenido (al abrir un archivo)
+    void cargar(int w, int h, std::vector<Capa> nuevas, int siguiente);
+
+    int numCapas() const { return int(capas.size()); }
+    bool indiceValido(int i) const { return i >= 0 && i < numCapas(); }
+    Capa *porId(int id);
+    const Capa *porId(int id) const;
+
+    // --- Acciones con historial ---
+    void nuevaCapa();
+    bool borrarCapa(int i);                    // false si es la única o el índice no existe
+    bool moverCapa(int i, int delta);
+    void insertarPlantilla(Capa c);            // la deja debajo de todo y conserva la capa activa
+    bool cambiarPropiedades(int i, const PropCapa &nuevas, const char *clave);
+    // El trazo ya está pintado en la capa. 'antes' es la capa completa tal como estaba ANTES del trazo:
+    // de ahí se saca la zona que permite deshacerlo sin repintar nada.
+    void registrarTrazo(int capaId, Trazo t, const Imagen &antes);
+    // Cubo de relleno en el punto (x, y) de la capa i. Con todasLasCapas mira la imagen combinada para
+    // decidir la zona (siempre pinta solo en la capa i). false si no hay nada que rellenar.
+    bool rellenar(int i, int x, int y, std::uint32_t color, const OpcionesRelleno &o, bool todasLasCapas);
+
+    bool deshacer() { return historial.deshacer(*this); }
+    bool rehacer() { return historial.rehacer(*this); }
+
+    // --- Sin historial ---
+    void setVisible(int i, bool v);
+
+    bool modificado() const { return sucioExtra || historial.modificado(); }
+    void marcarGuardado() { historial.marcarGuardado(); sucioExtra = false; }
+
+    // Vuelve a pintar una capa desde su base y sus operaciones (al abrir un archivo)
+    void reconstruir(Capa &c);
+
+    // Todas las capas visibles sobre blanco. La plantilla solo si se pide.
+    Imagen componer(bool conPlantilla) const;
+    // Color visible en un punto (todas las capas visibles, plantilla incluida, sobre blanco)
+    Pixel colorEn(int x, int y) const;
+
+    std::size_t totalOperaciones() const;
+};
+
+}  // namespace plz

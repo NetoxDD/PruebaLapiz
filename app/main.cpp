@@ -16,6 +16,7 @@
 #include <QHBoxLayout>
 #include <QFormLayout>
 #include <QColorDialog>
+#include <QCheckBox>
 #include <QFileDialog>
 #include <QInputDialog>
 #include <QMessageBox>
@@ -30,6 +31,7 @@
 #include <functional>
 #include <cmath>
 #include "canvas.h"
+#include "selector_color.h"
 #include <QToolButton>
 #include <QStringList>
 #include <QList>
@@ -70,103 +72,6 @@ protected:
         if (!puedeCerrar || puedeCerrar()) e->accept(); else e->ignore();
     }
 };
-// Cuadro de saturación/brillo + barra de tono (todos los colores RGB)
-class SelectorColor : public QWidget {
-    double h = 0.0, s = 0.0, v = 0.0;
-    QImage imgSV;
-    double hImg = -1;
-    enum Arrastre { Nada, SV, Tono } arrastre = Nada;
-
-    QRect rSV() const { return QRect(0, 0, width(), height() - 28); }
-    QRect rTono() const { return QRect(0, height() - 20, width(), 20); }
-
-    void mover(const QPointF &p) {
-        if (arrastre == SV) {
-            const QRect r = rSV();
-            s = std::clamp((p.x() - r.left()) / double(r.width() - 1), 0.0, 1.0);
-            v = 1.0 - std::clamp((p.y() - r.top()) / double(r.height() - 1), 0.0, 1.0);
-        } else if (arrastre == Tono) {
-            const QRect r = rTono();
-            h = std::clamp((p.x() - r.left()) / double(r.width() - 1), 0.0, 0.999);
-        }
-        update();
-        if (alCambiar) alCambiar(color());
-    }
-
-public:
-    std::function<void(const QColor &)> alCambiar;   // mientras arrastras
-    std::function<void(const QColor &)> alSoltar;    // al soltar el botón
-
-    SelectorColor() {
-        setMinimumSize(200, 220);
-        setFocusPolicy(Qt::NoFocus);
-    }
-
-    QColor color() const { return QColor::fromHsvF(h, s, v); }
-
-    void setColor(const QColor &c) {          // no dispara los avisos
-        if (c.hsvHueF() >= 0) h = std::min<double>(c.hsvHueF(), 0.999);   // en grises se conserva el tono   // en grises se conserva el tono
-        s = c.hsvSaturationF();
-        v = c.valueF();
-        update();
-    }
-
-protected:
-    void mousePressEvent(QMouseEvent *e) override {
-        const QPoint p = e->position().toPoint();
-        if (rSV().contains(p)) arrastre = SV;
-        else if (rTono().adjusted(0, -6, 0, 6).contains(p)) arrastre = Tono;
-        else return;
-        mover(e->position());
-    }
-    void mouseMoveEvent(QMouseEvent *e) override {
-        if (arrastre != Nada) mover(e->position());
-    }
-    void mouseReleaseEvent(QMouseEvent *) override {
-        if (arrastre == Nada) return;
-        arrastre = Nada;
-        if (alSoltar) alSoltar(color());
-    }
-
-    void paintEvent(QPaintEvent *) override {
-        QPainter g(this);
-        g.setRenderHint(QPainter::Antialiasing);
-
-        // Cuadro SV (se dibuja a 128×128 y se escala)
-        if (imgSV.isNull() || hImg != h) {
-            imgSV = QImage(128, 128, QImage::Format_RGB32);
-            for (int y = 0; y < 128; ++y) {
-                QRgb *fila = reinterpret_cast<QRgb *>(imgSV.scanLine(y));
-                for (int x = 0; x < 128; ++x)
-                    fila[x] = QColor::fromHsvF(h, x / 127.0, 1.0 - y / 127.0).rgb();
-            }
-            hImg = h;
-        }
-        const QRect r = rSV();
-        g.setRenderHint(QPainter::SmoothPixmapTransform);
-        g.drawImage(r, imgSV);
-
-        const QPointF m(r.left() + s * (r.width() - 1), r.top() + (1.0 - v) * (r.height() - 1));
-        g.setBrush(Qt::NoBrush);
-        g.setPen(QPen(Qt::white, 2));
-        g.drawEllipse(m, 6, 6);
-        g.setPen(QPen(Qt::black, 1));
-        g.drawEllipse(m, 7.5, 7.5);
-
-        // Barra de tono
-        const QRect t = rTono();
-        QLinearGradient gr(t.left(), 0, t.right(), 0);
-        for (int i = 0; i <= 6; ++i)
-            gr.setColorAt(i / 6.0, QColor::fromHsvF(i == 6 ? 0.0 : i / 6.0, 1.0, 1.0));
-        g.fillRect(t, gr);
-        const qreal x = t.left() + h * (t.width() - 1);
-        g.setPen(QPen(Qt::white, 2));
-        g.drawRect(QRectF(x - 3, t.top() - 1, 6, t.height() + 2));
-        g.setPen(QPen(Qt::black, 1));
-        g.drawRect(QRectF(x - 4, t.top() - 2, 8, t.height() + 4));
-    }
-};
-
 int main(int argc, char *argv[]) {
     // "--software" fuerza el renderizador por software (equipos sin driver de GPU)
     for (int i = 1; i < argc; ++i)
@@ -238,7 +143,7 @@ int main(int argc, char *argv[]) {
             const int n = canvas->numCapas();
             for (int r = 0; r < n; ++r) {        // la capa de arriba va primero en la lista
                 const Capa &c = canvas->capa(n - 1 - r);
-                QListWidgetItem *it = new QListWidgetItem(c.nombre);
+                QListWidgetItem *it = new QListWidgetItem(QString::fromStdString(c.nombre));
                 it->setFlags(it->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsEditable);
                 it->setCheckState(c.visible ? Qt::Checked : Qt::Unchecked);
                 lista->addItem(it);
@@ -639,7 +544,7 @@ int main(int argc, char *argv[]) {
     barra->setMovable(false);
 
     QAction *aColor = barra->addAction(iconoColor(canvas->color()), "Color...");
-    std::function<void(const QColor &)> usarColor;   // se define junto a la paleta
+    std::function<void(const QColor &)> usarColor;   // se define más abajo, junto al selector de color
     QObject::connect(aColor, &QAction::triggered, [&]() {
         const QColor c = QColorDialog::getColor(canvas->color(), &ventana, "Elige un color");
         if (c.isValid()) usarColor(c);
@@ -684,6 +589,48 @@ int main(int argc, char *argv[]) {
     aGotero->setShortcut(QKeySequence(Qt::Key_I));
     QObject::connect(aGotero, &QAction::toggled, [=](bool a) { canvas->setCuentagotas(a); });
 
+    QAction *aCubo = barra->addAction("Cubo");
+    aCubo->setCheckable(true);
+    aCubo->setShortcut(QKeySequence(Qt::Key_G));
+    aCubo->setToolTip("Cubo de relleno (G)");
+
+    // Opciones del cubo: solo se ven cuando está activo
+    QWidget *opcionesCubo = new QWidget;
+    QHBoxLayout *hoc = new QHBoxLayout(opcionesCubo);
+    hoc->setContentsMargins(4, 0, 4, 0);
+    hoc->addWidget(new QLabel("Tolerancia:"));
+    QSlider *sTol = new QSlider(Qt::Horizontal);
+    sTol->setRange(0, 100);
+    sTol->setValue(12);
+    sTol->setFixedWidth(110);
+    sTol->setFocusPolicy(Qt::NoFocus);
+    hoc->addWidget(sTol);
+    QLabel *lTol = new QLabel("12%");
+    lTol->setMinimumWidth(32);
+    hoc->addWidget(lTol);
+    QCheckBox *cTodas = new QCheckBox("Todas las capas");
+    cTodas->setFocusPolicy(Qt::NoFocus);
+    cTodas->setToolTip("Decide la zona mirando todas las capas visibles; pinta solo en la capa activa");
+    hoc->addWidget(cTodas);
+    QAction *aOpcionesCubo = barra->addWidget(opcionesCubo);
+    aOpcionesCubo->setVisible(false);
+
+    canvas->cubo.tolerancia = qRound(12 * 2.55);
+    QObject::connect(sTol, &QSlider::valueChanged, [=](int v) {
+        canvas->cubo.tolerancia = qRound(v * 2.55);
+        lTol->setText(QString("%1%").arg(v));
+    });
+    QObject::connect(cTodas, &QCheckBox::toggled, [=](bool b) { canvas->cubo.todasCapas = b; });
+    // El cubo, el borrador y el cuentagotas son excluyentes
+    QObject::connect(aCubo, &QAction::toggled, [=](bool activo) {
+        canvas->setCubo(activo);
+        aOpcionesCubo->setVisible(activo);
+        if (activo) { aBorrador->setChecked(false); aGotero->setChecked(false); }
+    });
+    QObject::connect(aBorrador, &QAction::toggled, [=](bool a) { if (a) aCubo->setChecked(false); });
+    QObject::connect(aGotero, &QAction::toggled, [=](bool a) { if (a) aCubo->setChecked(false); });
+    QObject::connect(cPincel, &QComboBox::currentIndexChanged, [=](int) { aCubo->setChecked(false); });
+
     QAction *aTableta = barra->addAction("Tableta...");
     QObject::connect(aTableta, &QAction::triggered, [=]() {
         dlg->show();
@@ -701,7 +648,6 @@ int main(int argc, char *argv[]) {
     aRehacer->setShortcuts({QKeySequence::Redo, QKeySequence(Qt::CTRL | Qt::Key_Y)});
     QObject::connect(aRehacer, &QAction::triggered, [=]() { canvas->rehacer(); });
 
-    // ---------- Paleta de colores ----------
     // ---------- Selector de color (espectro RGB) ----------
     QDockWidget *dockColor = new QDockWidget("Color", &ventana);
     QWidget *pc = new QWidget;
@@ -733,81 +679,27 @@ int main(int argc, char *argv[]) {
         sbB->setValue(c.blue());
     };
 
-    // ---------- Paleta de colores ----------
-    QToolBar *paleta = new QToolBar("Colores");
-    paleta->setMovable(false);
-    ventana.addToolBarBreak();
-    ventana.addToolBar(paleta);
-
-    auto estilo = [](QToolButton *b, const QColor &c, bool vacio) {
-        if (vacio)
-            b->setStyleSheet("QToolButton{background:transparent;border:1px dashed #666;}");
-        else
-            b->setStyleSheet(QString("QToolButton{background:%1;border:1px solid #666;}"
-                                     "QToolButton:hover{border:2px solid #ffffff;}").arg(c.name()));
-    };
-    auto nuevoBoton = [&](const QColor &c, bool vacio) {
-        QToolButton *b = new QToolButton;
-        b->setFixedSize(24, 24);
-        b->setFocusPolicy(Qt::NoFocus);
-        estilo(b, c, vacio);
-        return b;
-    };
-
-    const QStringList base = {
-                               "#000000", "#404040", "#808080", "#c0c0c0", "#ffffff", "#7f0000",
-                               "#e53935", "#ff9800", "#ffeb3b", "#8bc34a", "#2e7d32", "#00bcd4",
-                               "#1e88e5", "#1a237e", "#8e24aa", "#e91e8c", "#795548", "#ffcc99"};
-    for (const QString &hx : base) {
-        const QColor c(hx);
-        QToolButton *b = nuevoBoton(c, false);
-        b->setToolTip(hx);
-        paleta->addWidget(b);
-        QObject::connect(b, &QToolButton::clicked, [&, c]() { usarColor(c); });
-    }
-
-    paleta->addSeparator();
-    paleta->addWidget(new QLabel(" Recientes: "));
-    QList<QColor> recientes;
-    std::vector<QToolButton *> botonesRec;
-    for (int i = 0; i < 8; ++i) {
-        QToolButton *b = nuevoBoton(QColor(), true);
-        b->setEnabled(false);
-        paleta->addWidget(b);
-        botonesRec.push_back(b);
-        QObject::connect(b, &QToolButton::clicked, [&, i]() {
-            if (i < recientes.size()) usarColor(recientes[i]);
-        });
-    }
-
-    // Cambia el color activo (sin tocar la lista de recientes)
+    // ---------- Color ----------
+    // Mientras arrastras en el selector llegan cientos de cambios por segundo. El color del lienzo se
+    // actualiza al instante, pero lo caro (icono de la barra y campos RGB/hex) se junta en un solo
+    // refresco cada 30 ms.
+    QColor colorPendiente = canvas->color();
+    QTimer *sincronizador = new QTimer(&ventana);
+    sincronizador->setSingleShot(true);
+    sincronizador->setInterval(30);
+    QObject::connect(sincronizador, &QTimer::timeout, [&]() {
+        aColor->setIcon(iconoColor(colorPendiente));
+        sincronizarCampos(colorPendiente);
+    });
     auto aplicarColor = [&](const QColor &c, bool sincronizarSelector) {
         canvas->setColor(c);
-        aColor->setIcon(iconoColor(c));
-        aBorrador->setChecked(false);            // elegir un color vuelve al pincel
-        sincronizarCampos(c);
+        colorPendiente = c;
+        aBorrador->setChecked(false);            // elegir un color vuelve al pincel (el cubo sigue activo)
         if (sincronizarSelector) selector->setColor(c);
+        if (!sincronizador->isActive()) sincronizador->start();
     };
-    auto guardarReciente = [&](const QColor &c) {
-        recientes.removeAll(c);
-        recientes.prepend(c);
-        while (recientes.size() > 8) recientes.removeLast();
-        for (int i = 0; i < int(botonesRec.size()); ++i) {
-            if (i < recientes.size()) {
-                estilo(botonesRec[i], recientes[i], false);
-                botonesRec[i]->setEnabled(true);
-                botonesRec[i]->setToolTip(recientes[i].name());
-            }
-        }
-    };
-    usarColor = [&](const QColor &c) {
-        aplicarColor(c, true);
-        guardarReciente(c);
-    };
-
-    // Selector: cambia en vivo, y entra a recientes solo al soltar
+    usarColor = [&](const QColor &c) { aplicarColor(c, true); };
     selector->alCambiar = [&](const QColor &c) { aplicarColor(c, false); };
-    selector->alSoltar = [&](const QColor &c) { guardarReciente(c); };
 
     // Campos hex y RGB
     QObject::connect(hex, &QLineEdit::editingFinished, [&]() {
@@ -818,7 +710,6 @@ int main(int argc, char *argv[]) {
         QObject::connect(sb, &QSpinBox::valueChanged, [&](int) {
             aplicarColor(QColor(sbR->value(), sbG->value(), sbB->value()), true);
         });
-        QObject::connect(sb, &QSpinBox::editingFinished, [&]() { guardarReciente(canvas->color()); });
     }
 
     // Cuentagotas: usa el color y vuelve al pincel
