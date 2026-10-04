@@ -52,6 +52,7 @@ void CmdPropiedades::poner(Documento &d, const PropCapa &p) {
     c->nombre = p.nombre;
     c->bloqueada = p.bloqueada;
     c->opacidad = p.opacidad;
+    c->fusion = p.fusion;
 }
 bool CmdPropiedades::fusionar(const Comando &otro) {
     const auto *o = dynamic_cast<const CmdPropiedades *>(&otro);

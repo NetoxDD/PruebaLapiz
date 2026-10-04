@@ -287,3 +287,21 @@ PRUEBA(forma_shift_restringe) {
     Punto r = restringirForma(FORMA_RECT, a, {-40, 90, .5});
     VERIFICAR(r.x == -90 && r.y == 90);                             // cuadrado, respetando el sentido
 }
+
+PRUEBA(revision_sube_con_cada_cambio_y_nunca_baja) {
+    Documento d(10, 10);
+    std::uint64_t r = d.revision();
+    auto sube = [&]() { const bool ok = d.revision() > r; r = d.revision(); return ok; };
+    VERIFICAR(d.pegar(0, Imagen(2, 2, 0xFFFF0000), 1, 1));
+    VERIFICAR(sube());
+    VERIFICAR(d.deshacer());
+    VERIFICAR(sube());                       // deshacer también cambia el dibujo
+    VERIFICAR(d.rehacer());
+    VERIFICAR(sube());
+    d.setVisible(0, false);                  // no entra en el historial, pero cuenta
+    VERIFICAR(sube());
+    d.marcarModificado();
+    VERIFICAR(sube() && d.modificado());
+    d.marcarGuardado();
+    VERIFICAR(!d.modificado() && d.revision() == r);   // guardar no cambia el dibujo
+}

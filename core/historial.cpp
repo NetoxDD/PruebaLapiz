@@ -9,6 +9,7 @@ void Historial::ejecutar(Documento &d, std::unique_ptr<Comando> c) {
 }
 
 void Historial::registrar(std::unique_ptr<Comando> c) {
+    ++revision_;
     deshechos.clear();
     if (marca > long(hechos.size())) marca = -1;       // el estado guardado estaba en lo rehacible
     if (!hechos.empty() && hechos.back()->fusionar(*c)) {
@@ -36,6 +37,7 @@ bool Historial::deshacer(Documento &d) {
     bytesHechos -= std::min(bytesHechos, c->bytes());
     c->deshacer(d);
     deshechos.push_back(std::move(c));
+    ++revision_;
     return true;
 }
 
@@ -46,6 +48,7 @@ bool Historial::rehacer(Documento &d) {
     c->aplicar(d);
     bytesHechos += c->bytes();
     hechos.push_back(std::move(c));
+    ++revision_;
     return true;
 }
 

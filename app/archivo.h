@@ -1,5 +1,5 @@
 #pragma once
-// Guardar y abrir el formato .json de PruebaLapiz (versión 4; también abre la 1, 2 y 3).
+// Guardar y abrir el formato .json de PruebaLapiz (versión 5; también abre de la 1 a la 4).
 #include <QBuffer>
 #include <QFile>
 #include <QJsonArray>
@@ -27,6 +27,21 @@ inline QJsonObject trazoAJson(const plz::Trazo &t) {
     o["simular"] = t.simular;
     o["borrar"] = t.borrar;
     if (t.forma) { o["forma"] = t.forma; o["relleno"] = t.relleno; }
+    if (t.estampado) {
+        QJsonObject e;
+        e["punta"] = t.est.punta;
+        e["esp"] = t.est.espaciado;
+        e["disp"] = t.est.dispersion;
+        e["vtam"] = t.est.variaTam;
+        e["rot"] = t.est.rotacion;
+        e["sigue"] = t.est.sigueTrazo;
+        e["vrot"] = t.est.variaRot;
+        e["flujo"] = t.est.flujo;
+        e["pres"] = t.est.presion;
+        e["grano"] = t.est.grano;
+        o["estampa"] = e;
+        o["semilla"] = qint64(t.semilla);
+    }
     if (!t.recorte.empty()) {
         QJsonArray r;
         for (const pf::Vec &v : t.recorte) { r.append(v.x); r.append(v.y); }
@@ -47,6 +62,21 @@ inline bool trazoDeJson(const QJsonObject &o, plz::Trazo &t) {
     t.borrar = o["borrar"].toBool();
     t.forma = o["forma"].toInt(0);
     t.relleno = o["relleno"].toBool();
+    if (o.contains("estampa")) {
+        const QJsonObject e = o["estampa"].toObject();
+        t.estampado = true;
+        t.est.punta = e["punta"].toInt(plz::PUNTA_SUAVE);
+        t.est.espaciado = e["esp"].toDouble(0.25);
+        t.est.dispersion = e["disp"].toDouble(0);
+        t.est.variaTam = e["vtam"].toDouble(0);
+        t.est.rotacion = e["rot"].toDouble(0);
+        t.est.sigueTrazo = e["sigue"].toBool(false);
+        t.est.variaRot = e["vrot"].toDouble(0);
+        t.est.flujo = e["flujo"].toDouble(1);
+        t.est.presion = e["pres"].toDouble(0.5);
+        t.est.grano = e["grano"].toDouble(0);
+        t.semilla = std::uint32_t(qint64(o["semilla"].toDouble(1)));
+    }
     const QJsonArray rc = o["recorte"].toArray();
     for (int i = 0; i + 1 < rc.size(); i += 2) t.recorte.push_back({rc[i].toDouble(), rc[i + 1].toDouble()});
     for (int i = 0; i + 2 < pts.size(); i += 3)
@@ -96,6 +126,23 @@ inline QJsonObject pegadoAJson(const plz::Pegado &p) {
     return o;
 }
 
+inline QJsonObject transformacionAJson(const plz::Transformacion &t) {
+    QJsonObject o;
+    o["tipo"] = "transformar";
+    o["origen"] = spansAJson(t.origen);
+    o["m"] = QJsonArray{t.m.a, t.m.b, t.m.c, t.m.d, t.m.tx, t.m.ty};
+    if (!t.suave) o["suave"] = false;
+    return o;
+}
+inline bool transformacionDeJson(const QJsonObject &o, plz::Transformacion &t) {
+    const QJsonArray m = o["m"].toArray();
+    if (m.size() != 6) return false;
+    t.origen = spansDeJson(o["origen"].toArray());
+    t.m = plz::Afin{m[0].toDouble(), m[1].toDouble(), m[2].toDouble(), m[3].toDouble(), m[4].toDouble(), m[5].toDouble()};
+    t.suave = o["suave"].toBool(true);
+    return !t.origen.empty();
+}
+
 inline bool guardar(const plz::Documento &doc, const QString &ruta) {
     QJsonArray capasJson;
     for (const plz::Capa &c : doc.capas) {
@@ -103,13 +150,15 @@ inline bool guardar(const plz::Documento &doc, const QString &ruta) {
         for (const plz::Operacion &op : c.ops) {
             if (const plz::Trazo *t = std::get_if<plz::Trazo>(&op)) arr.append(trazoAJson(*t));
             else if (const plz::Relleno *r = std::get_if<plz::Relleno>(&op)) arr.append(rellenoAJson(*r));
-            else arr.append(pegadoAJson(std::get<plz::Pegado>(op)));
+            else if (const plz::Pegado *p = std::get_if<plz::Pegado>(&op)) arr.append(pegadoAJson(*p));
+            else arr.append(transformacionAJson(std::get<plz::Transformacion>(op)));
         }
         QJsonObject o;
         o["nombre"] = QString::fromStdString(c.nombre);
         o["visible"] = c.visible;
         o["bloqueada"] = c.bloqueada;
         o["opacidad"] = c.opacidad;
+        if (c.fusion != plz::Fusion::Normal) o["fusion"] = int(c.fusion);
         o["ops"] = arr;
         if (c.esPlantilla) {
             QByteArray bytes;
@@ -126,7 +175,7 @@ inline bool guardar(const plz::Documento &doc, const QString &ruta) {
     lienzo["alto"] = doc.alto;
     QJsonObject raiz;
     raiz["formato"] = "PruebaLapiz";
-    raiz["version"] = 4;
+    raiz["version"] = 5;
     raiz["lienzo"] = lienzo;
     raiz["capas"] = capasJson;
 
@@ -163,6 +212,13 @@ inline bool abrir(plz::Documento &doc, const QString &ruta) {
                 c.ops.push_back(std::move(r));
                 continue;
             }
+            if (o["tipo"].toString() == "transformar") {
+                plz::Transformacion t;
+                if (!transformacionDeJson(o, t)) continue;
+                plz::aplicarTransformacion(c.img, t);
+                c.ops.push_back(std::move(t));
+                continue;
+            }
             if (o["tipo"].toString() == "pegado") {
                 QImage im;
                 im.loadFromData(QByteArray::fromBase64(o["imagen"].toString().toLatin1()), "PNG");
@@ -174,8 +230,9 @@ inline bool abrir(plz::Documento &doc, const QString &ruta) {
             }
             plz::Trazo t;
             if (!trazoDeJson(o, t)) continue;
-            t.contornos = t.forma ? plz::contornosDeForma(t) : std::vector<plz::Contorno>{plz::calcularContorno(t, true)};
-            if (doc.pintor) doc.pintor(c.img, t);
+            if (!t.estampado)
+                t.contornos = t.forma ? plz::contornosDeForma(t) : std::vector<plz::Contorno>{plz::calcularContorno(t, true)};
+            doc.pintarTrazo(c.img, t);
             c.ops.push_back(std::move(t));
         }
     };
@@ -187,6 +244,7 @@ inline bool abrir(plz::Documento &doc, const QString &ruta) {
             c.visible = o["visible"].toBool(true);
             c.bloqueada = o["bloqueada"].toBool(false);
             c.opacidad = o["opacidad"].toDouble(1.0);
+            c.fusion = plz::fusionDeInt(o["fusion"].toInt(0));
             if (o["plantilla"].toBool()) {          // la base va primero; los trazos se pintan encima
                 QImage im;
                 im.loadFromData(QByteArray::fromBase64(o["imagen"].toString().toLatin1()), "PNG");

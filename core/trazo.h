@@ -16,10 +16,26 @@ struct Punto {
 
 using Contorno = std::vector<pf::Vec>;   // polígono cerrado que rodea el trazo
 
-enum Forma { FORMA_LIBRE = 0, FORMA_LINEA, FORMA_RECT, FORMA_ELIPSE };
+enum Forma { FORMA_LIBRE = 0, FORMA_LINEA, FORMA_RECT, FORMA_ELIPSE, FORMA_POLIGONO };
+
+// Pinceles de estampado: en vez de un contorno continuo se repite un "sello" a lo largo del trazo
+enum Punta { PUNTA_REDONDA = 0, PUNTA_SUAVE, PUNTA_ESTRELLA, PUNTA_HOJA };
+
+struct Estampa {
+    int punta = PUNTA_SUAVE;
+    double espaciado = 0.25;      // distancia entre sellos, como fracción del tamaño (mínimo 1 px)
+    double dispersion = 0;        // desvío aleatorio del sello, como fracción del tamaño
+    double variaTam = 0;          // 0..1: cuánto se encoge el sello al azar
+    double rotacion = 0;          // giro fijo, en grados
+    bool sigueTrazo = false;      // gira para seguir la dirección del trazo
+    double variaRot = 0;          // giro aleatorio de ±grados
+    double flujo = 1;             // opacidad de cada sello (0..1); se acumulan al solaparse
+    double presion = 0.5;         // 0..1: cuánto cambia la presión el tamaño
+    double grano = 0;             // 0..1: textura de papel que se come parte del sello
+};
 
 struct Trazo {
-    int forma = FORMA_LIBRE;       // si no es libre, 'completo' tiene solo 2 puntos: inicio y fin del arrastre
+    int forma = FORMA_LIBRE;       // si no es libre, 'completo' tiene 2 puntos (inicio y fin del arrastre); el polígono, todos sus vértices
     bool relleno = false;          // formas cerradas: relleno en vez de solo contorno
     std::vector<Punto> puntos;     // tramo en curso (se recorta al congelar)
     std::vector<Punto> completo;   // TODOS los puntos (lo que se guarda)
@@ -29,6 +45,9 @@ struct Trazo {
     double streamline = 0.5;
     bool simular = false;          // true con mouse: presión simulada por velocidad
     bool borrar = false;           // true = borra en vez de pintar
+    bool estampado = false;        // true = se pinta repitiendo un sello (ver estampa.h) en vez de con 'contornos'
+    Estampa est;
+    std::uint32_t semilla = 1;     // fija el azar del estampado: el mismo trazo da siempre el mismo dibujo
     Contorno recorte;              // polígono de la selección activa al dibujar (vacío = sin recorte)
     std::vector<Contorno> contornos;   // tramos ya calculados; se pintan juntos (relleno WindingFill)
 };
@@ -52,7 +71,7 @@ inline Contorno calcularContorno(const Trazo &t, bool terminado) {
 // Con Shift: la línea salta de 15° en 15°; rectángulo y elipse se vuelven cuadrado y círculo
 inline Punto restringirForma(int forma, const Punto &a, Punto b) {
     const double dx = b.x - a.x, dy = b.y - a.y;
-    if (forma == FORMA_LINEA) {
+    if (forma == FORMA_LINEA || forma == FORMA_POLIGONO) {   // en el polígono, 'a' es el vértice anterior
         const double paso = 3.14159265358979323846 / 12.0;
         const double ang = std::round(std::atan2(dy, dx) / paso) * paso, len = std::hypot(dx, dy);
         b.x = a.x + len * std::cos(ang);
@@ -84,6 +103,20 @@ inline std::vector<Contorno> contornosDeForma(const Trazo &t) {
         if (x1 - x0 < 1 || y1 - y0 < 1) return res;
         lado(x0, y0, x1, y0); lado(x1, y0, x1, y1); lado(x1, y1, x0, y1); lado(x0, y1, x0, y0);
         cerrada = true;
+    } else if (t.forma == FORMA_POLIGONO) {
+        const std::size_t n = t.completo.size();
+        if (n == 2) {                                  // con dos vértices todavía es una línea
+            lado(a.x, a.y, b.x, b.y);
+            ruta.push_back({b.x, b.y});
+        } else {                                       // con tres o más se cierra solo
+            for (std::size_t i = 0; i < n; ++i) {
+                const Punto &p = t.completo[i], &q = t.completo[(i + 1) % n];
+                if (std::hypot(q.x - p.x, q.y - p.y) < 1e-6) continue;   // vértices repetidos
+                lado(p.x, p.y, q.x, q.y);
+            }
+            cerrada = true;
+        }
+        if (ruta.size() < 2) return res;
     } else {
         const double rx = (x1 - x0) / 2, ry = (y1 - y0) / 2;
         if (rx < 0.5 || ry < 0.5) return res;
@@ -110,6 +143,10 @@ inline std::vector<Contorno> contornosDeForma(const Trazo &t) {
 inline Rect rectDeTrazo(const Trazo &t, int ancho, int alto) {
     double x0 = 1e18, y0 = 1e18, x1 = -1e18, y1 = -1e18;
     auto ver = [&](double x, double y) { x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y); };
+    if (t.estampado) {      // un sello girado cabe en un cuadrado de lado grosor·√2, más el desvío aleatorio
+        const double r = t.grosor * (0.7072 + t.est.dispersion) + 2;
+        for (const Punto &p : t.completo) { ver(p.x - r, p.y - r); ver(p.x + r, p.y + r); }
+    } else
     for (const Contorno &c : t.contornos) for (const pf::Vec &v : c) ver(v.x, v.y);
     if (x1 < x0) for (const Punto &p : t.completo) { ver(p.x - t.grosor, p.y - t.grosor); ver(p.x + t.grosor, p.y + t.grosor); }
     if (x1 < x0) return Rect{};

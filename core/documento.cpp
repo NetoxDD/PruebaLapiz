@@ -71,7 +71,7 @@ void Documento::insertarPlantilla(Capa c) {
 bool Documento::cambiarPropiedades(int i, const PropCapa &nuevas, const char *clave) {
     if (!indiceValido(i)) return false;
     const Capa &c = capas[std::size_t(i)];
-    const PropCapa antes{c.nombre, c.bloqueada, c.opacidad};
+    const PropCapa antes{c.nombre, c.bloqueada, c.opacidad, c.fusion};
     PropCapa p = nuevas;
     p.opacidad = std::clamp(p.opacidad, 0.0, 1.0);
     if (p == antes) return false;
@@ -146,6 +146,23 @@ bool Documento::pegar(int i, Imagen img, int x, int y) {
     return true;
 }
 
+bool Documento::transformar(int i, const Seleccion &s, const Afin &m, bool suave) {
+    if (!indiceValido(i) || s.vacia() || m.esIdentidad()) return false;
+    Capa &c = capas[std::size_t(i)];
+    Transformacion t;
+    t.origen = s.tramos();
+    t.m = m;
+    t.suave = suave;
+    const Rect zona = rectDeTransformacion(t, c.img.w, c.img.h);
+    if (zona.vacio()) return false;
+    Imagen antes = c.img.recortar(zona);
+    aplicarTransformacion(c.img, t);
+    auto cmd = std::make_unique<CmdOperacion>(c.id, zona, std::move(antes), c.img.recortar(zona));
+    c.ops.push_back(std::move(t));
+    historial.registrar(std::move(cmd));
+    return true;
+}
+
 void aplicarPegado(Imagen &dst, const Pegado &p) {
     const Rect zona = Rect{p.x, p.y, p.x + p.img.w, p.y + p.img.h}.interseccion(dst.rectTotal());
     for (int yy = zona.y0; yy < zona.y1; ++yy)
@@ -161,15 +178,17 @@ void Documento::setVisible(int i, bool v) {
     if (!indiceValido(i) || capas[std::size_t(i)].visible == v) return;
     capas[std::size_t(i)].visible = v;
     sucioExtra = true;
+    ++revisionExtra;
 }
 
 // ---------- Pixeles ----------
 void Documento::reconstruir(Capa &c) {
     if (!c.base.vacia()) c.img.copiarDe(c.base); else c.img.llenar(TRANSPARENTE);
     for (const Operacion &op : c.ops) {
-        if (const Trazo *t = std::get_if<Trazo>(&op)) { if (pintor) pintor(c.img, *t); }
+        if (const Trazo *t = std::get_if<Trazo>(&op)) pintarTrazo(c.img, *t);
         else if (const Relleno *r = std::get_if<Relleno>(&op)) aplicarRelleno(c.img, *r);
-        else aplicarPegado(c.img, std::get<Pegado>(op));
+        else if (const Pegado *p = std::get_if<Pegado>(&op)) aplicarPegado(c.img, *p);
+        else aplicarTransformacion(c.img, std::get<Transformacion>(op));
     }
     c.img.tocar();
 }
@@ -179,7 +198,7 @@ Imagen Documento::componer(bool conPlantilla) const {
     for (const Capa &c : capas) {
         if (!c.visible) continue;
         if (c.esPlantilla && !conPlantilla) continue;
-        mezclar(out, c.img, c.opacidad);
+        mezclar(out, c.img, c.opacidad, c.fusion);
     }
     return out;
 }
@@ -189,7 +208,7 @@ Pixel Documento::colorEn(int x, int y) const {
     Pixel p = BLANCO;
     for (const Capa &c : capas) {
         if (!c.visible || !c.img.dentro(x, y)) continue;
-        p = sobre(p, escalar(c.img.en(x, y), opacidadA255(c.opacidad)));
+        p = fusionar(p, escalar(c.img.en(x, y), opacidadA255(c.opacidad)), c.fusion);
     }
     return p;
 }

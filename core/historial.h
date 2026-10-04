@@ -1,6 +1,7 @@
 #pragma once
 // Historial de deshacer/rehacer basado en comandos. Sin Qt.
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -25,6 +26,7 @@ class Historial {
     std::size_t limite_ = 500;
     std::size_t bytesHechos = 0;
     std::size_t presupuesto_ = std::size_t(512) * 1024 * 1024;   // memoria máxima de los pasos guardados
+    std::uint64_t revision_ = 0;     // sube con cada cambio (también al deshacer y rehacer); nunca baja
     void recortarAntiguos();
 
 public:
@@ -36,6 +38,7 @@ public:
     bool puedeDeshacer() const { return !hechos.empty(); }
     bool puedeRehacer() const { return !deshechos.empty(); }
     std::size_t pasos() const { return hechos.size(); }
+    std::uint64_t revision() const { return revision_; }
 
     void marcarGuardado() { marca = long(hechos.size()); }
     bool modificado() const { return marca != long(hechos.size()); }
